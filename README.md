@@ -25,7 +25,25 @@ make
 ## Install
 
 The recommended install keeps the repository in your home directory and creates
-a `libft-tester` command in `~/.local/bin`.
+a `libft-tester` command in `~/.local/bin`. Both paths are inside your home
+directory, so this works well on shared 42 computers and does not require
+installing the tester into a system directory.
+
+### 42 Campus / Shared Computer
+
+Use this when `git`, `make`, and `cc` are already available:
+
+```sh
+cd "$HOME"
+if [ -d "$HOME/libft-tester/.git" ]; then git -C "$HOME/libft-tester" pull --ff-only; else git clone https://github.com/tamerakdeniz/libft-tester.git; fi
+cd "$HOME/libft-tester"
+make install
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+export PATH="$HOME/.local/bin:$PATH"
+libft-tester --help
+```
+
+If your campus shell is Bash, replace `~/.zshrc` with `~/.bashrc`.
 
 ### Linux
 
