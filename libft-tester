@@ -495,6 +495,8 @@ def valgrind_prefix():
 
 def memory_mode(args):
     if args.valgrind:
+        if platform.system() == "Darwin" and not valgrind_prefix():
+            return "asan"
         return "valgrind"
     if args.asan:
         return "asan"
@@ -509,6 +511,24 @@ def asan_options():
         f"{leak_flag}:halt_on_error=1:abort_on_error=1:"
         "allocator_may_return_null=1"
     )
+
+
+def memory_mode_warning(args, mode):
+    if mode != "asan" or platform.system() != "Darwin":
+        return None
+    if args.valgrind and not valgrind_prefix():
+        return (
+            "Valgrind was requested but was not found. On macOS, "
+            "libft-tester is using ASan/UBSan instead. Apple's ASan does not "
+            "support LeakSanitizer here, so this is not a strict leak check."
+        )
+    if args.leaks and not valgrind_prefix():
+        return (
+            "Valgrind was not found. macOS AddressSanitizer does not "
+            "support LeakSanitizer here, so --leaks is running ASan/UBSan "
+            "diagnostics without leak detection."
+        )
+    return None
 
 
 def strict_failure(result: TestResult):
@@ -539,11 +559,11 @@ def main():
     parser.add_argument("--all", action="store_true",
                         help="Run mandatory and bonus tests.")
     parser.add_argument("--leaks", action="store_true",
-                        help="Run memory checks: Valgrind if available, otherwise ASan.")
+                        help="Smart memory check: Valgrind when available, otherwise ASan.")
     parser.add_argument("--asan", action="store_true",
-                        help="Run an AddressSanitizer/UBSan memory pass.")
+                        help="Run an AddressSanitizer/UBSan memory pass. Recommended on macOS.")
     parser.add_argument("--valgrind", action="store_true",
-                        help="Run a Valgrind leak pass.")
+                        help="Run Valgrind. On macOS without Valgrind, falls back to ASan.")
     parser.add_argument("--verbose", action="store_true",
                         help="Print build logs and passing test output.")
     parser.add_argument("--only", action="append",
@@ -626,12 +646,8 @@ def main():
             print_result(color, result, args.verbose, index, len(tests))
 
         if mode:
-            if args.leaks and mode == "asan" and platform.system() == "Darwin":
-                warning = (
-                    "Valgrind was not found. macOS AddressSanitizer does not "
-                    "support LeakSanitizer here, so --leaks is running ASan/UBSan "
-                    "diagnostics without leak detection."
-                )
+            warning = memory_mode_warning(args, mode)
+            if warning:
                 warnings.append(warning)
                 print(color.yellow("Warning: ") + warning)
             memory_tests = [

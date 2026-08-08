@@ -22,6 +22,32 @@ make
 ./libft-tester --update
 ```
 
+## Memory Checks
+
+Recommended commands:
+
+```sh
+# Linux, when Valgrind is installed
+libft-tester . --valgrind
+
+# macOS
+libft-tester . --asan
+
+# Smart mode: Valgrind when available, otherwise ASan
+libft-tester . --leaks
+```
+
+Notes:
+
+- `--leaks` is the safest default for mixed environments.
+- On Linux, `--valgrind` gives the strictest leak report when Valgrind is installed.
+- On macOS, Valgrind is usually unavailable or unreliable. Use `--asan`.
+- If `--valgrind` is used on macOS and Valgrind is not found, the tester falls
+  back to ASan/UBSan and prints a warning.
+- Apple's ASan does not provide strict LeakSanitizer support in this setup, so
+  macOS ASan is best for invalid reads/writes and undefined behavior diagnostics,
+  not strict leak grading.
+
 ## Install
 
 The recommended install keeps the repository in your home directory and creates
