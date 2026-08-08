@@ -34,11 +34,11 @@ installing the tester into a system directory.
 Use this when `git`, `make`, and `cc` are already available:
 
 ```sh
-cd "$HOME"
-if [ -d "$HOME/libft-tester/.git" ]; then git -C "$HOME/libft-tester" pull --ff-only; else git clone https://github.com/tamerakdeniz/libft-tester.git; fi
-cd "$HOME/libft-tester"
+cd ~
+git clone https://github.com/tamerakdeniz/libft-tester.git
+cd ~/libft-tester
 make install
-grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.zshrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 export PATH="$HOME/.local/bin:$PATH"
 libft-tester --help
 ```
@@ -52,11 +52,11 @@ Copy-paste this in a terminal:
 ```sh
 sudo apt update
 sudo apt install -y git build-essential
-cd "$HOME"
+cd ~
 git clone https://github.com/tamerakdeniz/libft-tester.git
-cd "$HOME/libft-tester"
+cd ~/libft-tester
 make install
-grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 export PATH="$HOME/.local/bin:$PATH"
 libft-tester --help
 ```
@@ -67,11 +67,11 @@ Copy-paste this in Terminal:
 
 ```sh
 xcode-select --install 2>/dev/null || true
-cd "$HOME"
+cd ~
 git clone https://github.com/tamerakdeniz/libft-tester.git
-cd "$HOME/libft-tester"
+cd ~/libft-tester
 make install
-grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.zshrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 export PATH="$HOME/.local/bin:$PATH"
 libft-tester --help
 ```
@@ -93,11 +93,11 @@ Restart if Windows asks you to, then open Ubuntu and run:
 ```sh
 sudo apt update
 sudo apt install -y git build-essential
-cd "$HOME"
+cd ~
 git clone https://github.com/tamerakdeniz/libft-tester.git
-cd "$HOME/libft-tester"
+cd ~/libft-tester
 make install
-grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 export PATH="$HOME/.local/bin:$PATH"
 libft-tester --help
 ```
@@ -124,7 +124,7 @@ libft-tester --update
 Uninstall:
 
 ```sh
-cd "$HOME/libft-tester"
+cd ~/libft-tester
 make uninstall
 ```
 
