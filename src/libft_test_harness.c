@@ -536,15 +536,25 @@ static t_lt_result	test_memset_cases(char *message, size_t size)
 	unsigned char	buffer[16];
 	unsigned char	expected[16];
 	void			*ret;
+	int				values[] = {-42, 0, 'A', 0xff, 0x100, 0x123, 4200, 0x1F600};
+	size_t			index;
 
 	LT_REQUIRE(ft_memset);
-	memset(buffer, 0, sizeof(buffer));
-	memset(expected, 0, sizeof(expected));
-	ret = ft_memset(buffer + 2, 0x123, 8);
-	memset(expected + 2, 0x23, 8);
-	LT_CHECK(ret == buffer + 2, "ft_memset did not return the destination");
-	LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
-		"ft_memset wrote unexpected bytes");
+	index = 0;
+	while (index < sizeof(values) / sizeof(values[0]))
+	{
+		memset(buffer, 0x7a, sizeof(buffer));
+		memset(expected, 0x7a, sizeof(expected));
+		ret = ft_memset(buffer + 2, values[index], 8);
+		memset(expected + 2, (unsigned char)values[index], 8);
+		LT_CHECK(ret == buffer + 2,
+			"ft_memset did not return the destination for c=%d",
+			values[index]);
+		LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
+			"ft_memset wrote wrong byte for c=%d, expected 0x%02x",
+			values[index], (unsigned char)values[index]);
+		index++;
+	}
 	ft_memset(buffer, 0xff, 0);
 	LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
 		"ft_memset changed buffer with len 0");
@@ -1597,7 +1607,7 @@ static t_lt_test	g_tests[] = {
 	{"ft_isascii.range", "ft_isascii", "mandatory", "required", "full integer ASCII range", test_isascii_range},
 	{"ft_isprint.ascii", "ft_isprint", "mandatory", "required", "printable ASCII classification", test_isprint_ascii},
 	{"ft_strlen.cases", "ft_strlen", "mandatory", "required", "empty, embedded NUL, and large strings", test_strlen_cases},
-	{"ft_memset.cases", "ft_memset", "mandatory", "required", "return value, byte conversion, len 0", test_memset_cases},
+	{"ft_memset.cases", "ft_memset", "mandatory", "required", "return value, signed/wide byte conversion, len 0", test_memset_cases},
 	{"ft_bzero.cases", "ft_bzero", "mandatory", "required", "range zeroing and len 0", test_bzero_cases},
 	{"ft_memcpy.cases", "ft_memcpy", "mandatory", "required", "binary copy and len 0", test_memcpy_cases},
 	{"ft_memmove.overlap", "ft_memmove", "mandatory", "required", "forward and backward overlapping regions", test_memmove_overlap},
