@@ -1,0 +1,21 @@
+name: Smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  make-test:
+    name: make test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tester
+        run: make test
