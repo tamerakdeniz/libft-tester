@@ -19,6 +19,7 @@ make
 ./libft-tester ../libft --verbose
 ./libft-tester ../libft --only ft_memmove
 ./libft-tester ../libft --json report.json
+./libft-tester --update
 ```
 
 ## Install globally
@@ -56,6 +57,33 @@ To remove the symlink:
 make uninstall
 ```
 
+## Updates
+
+When run in an interactive terminal from a git checkout, `libft-tester` checks
+the GitHub remote briefly. If a newer remote `HEAD` is available, it prints a
+warning and keeps running the requested tests.
+
+Update the tester with:
+
+```sh
+libft-tester --update
+```
+
+The update command runs `git pull --ff-only` in the tester checkout. It refuses
+to run when the tester checkout has local changes.
+
+Disable the automatic update check for one run:
+
+```sh
+libft-tester . --no-update-check
+```
+
+Or disable it through the environment:
+
+```sh
+LIBFT_TESTER_NO_UPDATE_CHECK=1 libft-tester .
+```
+
 ## What it does
 
 - Copies the submitted Libft project into a temporary directory before building.
@@ -70,6 +98,8 @@ make uninstall
 - Writes CI-friendly exit codes: `0` for success, `1` for required test failures,
   and `2` for tester/build setup errors.
 - Can keep temporary build files with `--keep-tmp`.
+- Warns about newer tester versions during interactive terminal use and supports
+  self-updating with `libft-tester --update`.
 
 The tester includes strict subject tests and non-strict probe tests. Probe tests
 exercise undefined-behavior-adjacent inputs such as selected `NULL` arguments;

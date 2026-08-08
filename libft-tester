@@ -31,6 +31,7 @@ MANDATORY_FUNCTIONS = {
 }
 
 BONUS_FUNCTIONS = set()
+UPDATE_CHECK_TIMEOUT = 2.0
 
 
 class Color:
@@ -104,6 +105,105 @@ def run_command(cmd, cwd=None, timeout=30, env=None):
         raise TesterError(
             f"Command timed out after {timeout}s: {' '.join(map(str, cmd))}\n{output}"
         )
+    except FileNotFoundError as exc:
+        raise TesterError(f"Command not found: {exc.filename}")
+
+
+def run_quiet(cmd, timeout=UPDATE_CHECK_TIMEOUT):
+    try:
+        return subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def git_cmd(*args, timeout=UPDATE_CHECK_TIMEOUT):
+    return run_quiet(["git", "-C", str(ROOT), *args], timeout=timeout)
+
+
+def is_git_checkout():
+    result = git_cmd("rev-parse", "--is-inside-work-tree")
+    return result is not None and result.returncode == 0
+
+
+def local_git_head():
+    result = git_cmd("rev-parse", "HEAD")
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def remote_git_head():
+    result = git_cmd("ls-remote", "--symref", "origin", "HEAD")
+    if result is None or result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "HEAD" and len(parts[0]) >= 7:
+            return parts[0]
+    return None
+
+
+def remote_head_is_ancestor(remote_head):
+    result = git_cmd("merge-base", "--is-ancestor", remote_head, "HEAD")
+    return result is not None and result.returncode == 0
+
+
+def check_for_updates(color: Color):
+    if not is_git_checkout():
+        return
+    local_head = local_git_head()
+    remote_head = remote_git_head()
+    if not local_head or not remote_head or local_head == remote_head:
+        return
+    if remote_head_is_ancestor(remote_head):
+        return
+    local_short = local_head[:7]
+    remote_short = remote_head[:7]
+    print(
+        color.yellow("Update available: ")
+        + f"local {local_short}, remote {remote_short}. "
+        + "Run `libft-tester --update`."
+    )
+
+
+def run_self_update(color: Color):
+    if not is_git_checkout():
+        print(
+            color.red(
+                "This libft-tester installation is not a git checkout. "
+                "Re-clone the repository to update it."
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    status = git_cmd("status", "--porcelain", timeout=5)
+    if status is None or status.returncode != 0:
+        print(color.red("Could not inspect the tester git status."), file=sys.stderr)
+        return 2
+    if status.stdout.strip():
+        print(
+            color.red(
+                "Refusing to update because the tester checkout has local changes."
+            ),
+            file=sys.stderr,
+        )
+        print("Commit, stash, or discard those changes first.", file=sys.stderr)
+        return 2
+    print(color.blue("==> Updating libft-tester"))
+    result = run_command(["git", "-C", str(ROOT), "pull", "--ff-only"], timeout=60)
+    if result.stdout.strip():
+        print(result.stdout.rstrip())
+    if result.returncode != 0:
+        print(color.red("Update failed."), file=sys.stderr)
+        return 2
+    print(color.green("libft-tester is up to date."))
+    return 0
 
 
 def copy_project(source: Path, destination: Path):
@@ -394,7 +494,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Portable 42 Libft tester with isolated crash-safe tests."
     )
-    parser.add_argument("project", help="Path to the Libft project to test")
+    parser.add_argument("project", nargs="?",
+                        help="Path to the Libft project to test")
+    parser.add_argument("--update", action="store_true",
+                        help="Update this tester checkout with git pull --ff-only.")
+    parser.add_argument("--no-update-check", action="store_true",
+                        help="Do not check GitHub for a newer tester version.")
     parser.add_argument("--mandatory", action="store_true",
                         help="Run mandatory tests. This is the default.")
     parser.add_argument("--bonus", action="store_true",
@@ -422,6 +527,16 @@ def main():
     args = parser.parse_args()
 
     color = Color(sys.stdout.isatty() and not args.no_color)
+    if args.update:
+        return run_self_update(color)
+    if args.project is None:
+        parser.error("the following arguments are required: project")
+    if (
+        not args.no_update_check
+        and os.environ.get("LIBFT_TESTER_NO_UPDATE_CHECK") != "1"
+        and sys.stdout.isatty()
+    ):
+        check_for_updates(color)
     project = Path(args.project).expanduser().resolve()
     if not project.exists() or not project.is_dir():
         print(color.red(f"Invalid project directory: {project}"), file=sys.stderr)
