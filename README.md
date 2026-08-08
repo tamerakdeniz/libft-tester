@@ -22,38 +22,91 @@ make
 ./libft-tester --update
 ```
 
-## Install globally
+## Install
 
-Install a symlink into `~/.local/bin`:
+The recommended install keeps the repository in your home directory and creates
+a `libft-tester` command in `~/.local/bin`.
+
+### Linux
+
+Copy-paste this in a terminal:
 
 ```sh
+sudo apt update
+sudo apt install -y git build-essential
+cd "$HOME"
+git clone https://github.com/tamerakdeniz/libft-tester.git
+cd "$HOME/libft-tester"
 make install
-```
-
-If `~/.local/bin` is not already in your shell `PATH`, add this line to your
-shell config (`~/.zshrc`, `~/.bashrc`, or equivalent):
-
-```sh
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 export PATH="$HOME/.local/bin:$PATH"
+libft-tester --help
 ```
 
-After that, run the tester from any Libft project directory:
+### macOS
+
+Copy-paste this in Terminal:
 
 ```sh
-cd ../libft
+xcode-select --install 2>/dev/null || true
+cd "$HOME"
+git clone https://github.com/tamerakdeniz/libft-tester.git
+cd "$HOME/libft-tester"
+make install
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+export PATH="$HOME/.local/bin:$PATH"
+libft-tester --help
+```
+
+If you use Bash on macOS, replace `~/.zshrc` with `~/.bashrc`.
+
+### Windows
+
+Native Windows CMD/PowerShell is not supported. Use WSL with Ubuntu.
+
+First, run this in PowerShell:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Restart if Windows asks you to, then open Ubuntu and run:
+
+```sh
+sudo apt update
+sudo apt install -y git build-essential
+cd "$HOME"
+git clone https://github.com/tamerakdeniz/libft-tester.git
+cd "$HOME/libft-tester"
+make install
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+export PATH="$HOME/.local/bin:$PATH"
+libft-tester --help
+```
+
+### Run From Any Libft Project
+
+After install:
+
+```sh
+cd /path/to/your/libft
 libft-tester . --all
 libft-tester . --only ft_memset
+libft-tester . --asan
 ```
 
-To install somewhere else:
+### Update Or Uninstall
+
+Update:
 
 ```sh
-make install PREFIX=/usr/local
+libft-tester --update
 ```
 
-To remove the symlink:
+Uninstall:
 
 ```sh
+cd "$HOME/libft-tester"
 make uninstall
 ```
 
