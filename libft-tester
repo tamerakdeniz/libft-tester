@@ -1,0 +1,592 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import platform
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import List, Optional
+
+
+ROOT = Path(__file__).resolve().parent
+HARNESS_SOURCE = ROOT / "src" / "libft_test_harness.c"
+
+MANDATORY_FUNCTIONS = {
+    "ft_isalpha", "ft_isdigit", "ft_isalnum", "ft_isascii", "ft_isprint",
+    "ft_strlen", "ft_memset", "ft_bzero", "ft_memcpy", "ft_memmove",
+    "ft_strlcpy", "ft_strlcat", "ft_toupper", "ft_tolower", "ft_strchr",
+    "ft_strrchr", "ft_strncmp", "ft_memchr", "ft_memcmp", "ft_strnstr",
+    "ft_atoi", "ft_calloc", "ft_strdup", "ft_substr", "ft_strjoin",
+    "ft_strtrim", "ft_split", "ft_itoa", "ft_strmapi", "ft_striteri",
+    "ft_putchar_fd", "ft_putstr_fd", "ft_putendl_fd", "ft_putnbr_fd",
+    "ft_lstnew", "ft_lstadd_front", "ft_lstsize", "ft_lstlast",
+    "ft_lstadd_back", "ft_lstdelone", "ft_lstclear", "ft_lstiter",
+    "ft_lstmap",
+}
+
+BONUS_FUNCTIONS = set()
+
+
+class Color:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def wrap(self, text: str, code: str) -> str:
+        if not self.enabled:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def red(self, text: str) -> str:
+        return self.wrap(text, "31;1")
+
+    def green(self, text: str) -> str:
+        return self.wrap(text, "32;1")
+
+    def yellow(self, text: str) -> str:
+        return self.wrap(text, "33;1")
+
+    def blue(self, text: str) -> str:
+        return self.wrap(text, "34;1")
+
+    def dim(self, text: str) -> str:
+        return self.wrap(text, "2")
+
+
+@dataclass
+class HarnessTest:
+    test_id: str
+    function: str
+    group: str
+    kind: str
+    description: str
+
+
+@dataclass
+class TestResult:
+    test_id: str
+    function: str
+    group: str
+    kind: str
+    description: str
+    phase: str
+    status: str
+    exit_code: Optional[int]
+    signal: Optional[str]
+    duration_ms: int
+    output: str
+
+
+class TesterError(Exception):
+    pass
+
+
+def run_command(cmd, cwd=None, timeout=30, env=None):
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        raise TesterError(
+            f"Command timed out after {timeout}s: {' '.join(map(str, cmd))}\n{output}"
+        )
+
+
+def copy_project(source: Path, destination: Path):
+    ignored_names = {
+        ".git", ".cache", ".idea", ".vscode", ".DS_Store",
+        "libft.a", "a.out",
+    }
+
+    def ignore(_dir, names):
+        ignored = set()
+        for name in names:
+            if name in ignored_names:
+                ignored.add(name)
+            elif name.endswith((".o", ".d", ".gcda", ".gcno", ".gcov")):
+                ignored.add(name)
+        return ignored
+
+    shutil.copytree(source, destination, ignore=ignore)
+
+
+def choose_groups(args):
+    if args.all:
+        return {"mandatory", "bonus"}
+    if args.bonus and args.mandatory:
+        return {"mandatory", "bonus"}
+    if args.bonus:
+        return {"bonus"}
+    return {"mandatory"}
+
+
+def parse_only(values):
+    selected = set()
+    for value in values or []:
+        for item in value.split(","):
+            item = item.strip()
+            if item:
+                selected.add(item)
+    return selected
+
+
+def build_target(project_dir: Path, include_bonus: bool, verbose: bool, make_vars=None):
+    make_vars = make_vars or []
+    makefile = project_dir / "Makefile"
+    if not makefile.exists():
+        raise TesterError(f"No Makefile found in copied project: {project_dir}")
+    fclean = run_command(["make", "-C", str(project_dir), "fclean"], timeout=60)
+    if verbose and fclean.stdout.strip():
+        print(fclean.stdout.rstrip())
+    if fclean.returncode != 0:
+        raise TesterError("make fclean failed:\n" + fclean.stdout)
+    build = run_command(["make", "-C", str(project_dir), *make_vars, "all"], timeout=120)
+    if verbose and build.stdout.strip():
+        print(build.stdout.rstrip())
+    if build.returncode != 0:
+        raise TesterError("make all failed:\n" + build.stdout)
+    if include_bonus and BONUS_FUNCTIONS:
+        bonus = run_command(["make", "-C", str(project_dir), *make_vars, "bonus"], timeout=120)
+        if verbose and bonus.stdout.strip():
+            print(bonus.stdout.rstrip())
+        if bonus.returncode != 0:
+            raise TesterError("make bonus failed:\n" + bonus.stdout)
+
+
+def find_libft(project_dir: Path):
+    root_lib = project_dir / "libft.a"
+    if root_lib.exists():
+        return root_lib, None
+    matches = list(project_dir.rglob("libft.a"))
+    if not matches:
+        raise TesterError("Build completed, but libft.a was not found.")
+    warning = (
+        "libft.a was not created at the project root. "
+        f"Using discovered archive: {matches[0]}"
+    )
+    return matches[0], warning
+
+
+def exported_symbols(libft: Path):
+    result = run_command(["nm", "-g", str(libft)], timeout=30)
+    if result.returncode != 0:
+        raise TesterError("nm failed while inspecting libft.a:\n" + result.stdout)
+    symbols = set()
+    for line in result.stdout.splitlines():
+        for token in line.strip().split():
+            if token.startswith("_ft_"):
+                symbols.add(token[1:])
+            elif token.startswith("ft_"):
+                symbols.add(token)
+    return symbols
+
+
+def whole_archive_flags(libft: Path):
+    if platform.system() == "Darwin":
+        return [f"-Wl,-force_load,{libft}"]
+    return ["-Wl,--whole-archive", str(libft), "-Wl,--no-whole-archive"]
+
+
+def compile_harness(libft: Path, output: Path, asan=False, disable_alloc_wrap=False):
+    if not HARNESS_SOURCE.exists():
+        raise TesterError(f"Harness source missing: {HARNESS_SOURCE}")
+    cmd = ["cc", "-Wall", "-Wextra", "-Werror", "-g", "-O0"]
+    if asan:
+        cmd += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+    if disable_alloc_wrap:
+        cmd += ["-DLT_DISABLE_ALLOC_WRAP=1"]
+    cmd += [str(HARNESS_SOURCE)]
+    cmd += whole_archive_flags(libft)
+    cmd += ["-o", str(output)]
+    if platform.system() != "Darwin":
+        cmd += ["-ldl"]
+    result = run_command(cmd, timeout=120)
+    if result.returncode != 0:
+        raise TesterError("Harness compilation failed:\n" + result.stdout)
+
+
+def load_tests(harness: Path):
+    result = run_command([str(harness), "--list"], timeout=10)
+    if result.returncode != 0:
+        raise TesterError("Could not list harness tests:\n" + result.stdout)
+    tests = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 4)
+        if len(parts) == 5:
+            tests.append(HarnessTest(*parts))
+    return tests
+
+
+def signal_name(returncode):
+    if returncode is None or returncode >= 0:
+        return None
+    signum = -returncode
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"SIG{signum}"
+
+
+def classify_result(test, phase, returncode, output, duration_ms, timed_out=False):
+    if timed_out:
+        status = "timeout"
+        sig = None
+    elif returncode == 0:
+        status = "pass"
+        sig = None
+    elif returncode == 2:
+        status = "missing"
+        sig = None
+    elif returncode == 3:
+        status = "skip"
+        sig = None
+    elif returncode is not None and returncode < 0:
+        status = "crash"
+        sig = signal_name(returncode)
+    elif returncode == 97 and phase == "valgrind":
+        status = "leak"
+        sig = None
+    else:
+        status = "fail"
+        sig = None
+    if test.kind == "probe" and status not in {"pass", "skip"}:
+        status = "warn"
+    return TestResult(
+        test.test_id,
+        test.function,
+        test.group,
+        test.kind,
+        test.description,
+        phase,
+        status,
+        returncode,
+        sig,
+        duration_ms,
+        output.strip(),
+    )
+
+
+def run_one(harness: Path, test: HarnessTest, timeout: float, phase="functional",
+            command_prefix=None, env=None):
+    cmd = []
+    if command_prefix:
+        cmd.extend(command_prefix)
+    cmd += [str(harness), "--run", test.test_id]
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            env=env,
+        )
+        duration_ms = int((time.monotonic() - started) * 1000)
+        return classify_result(
+            test, phase, proc.returncode, proc.stdout, duration_ms
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        return classify_result(
+            test, phase, None, output, duration_ms, timed_out=True
+        )
+
+
+def format_status(color: Color, status: str):
+    labels = {
+        "pass": color.green("PASS"),
+        "fail": color.red("FAIL"),
+        "missing": color.red("MISS"),
+        "crash": color.red("CRASH"),
+        "timeout": color.red("TIMEOUT"),
+        "warn": color.yellow("WARN"),
+        "skip": color.yellow("SKIP"),
+        "leak": color.red("LEAK"),
+    }
+    return labels.get(status, status.upper())
+
+
+def print_result(color: Color, result: TestResult, verbose: bool):
+    label = format_status(color, result.status)
+    phase = "" if result.phase == "functional" else f" {color.dim(result.phase)}"
+    sig = f" {result.signal}" if result.signal else ""
+    print(
+        f"[{label}]{phase} {result.test_id:<32} "
+        f"{color.dim(result.description)} ({result.duration_ms} ms){sig}"
+    )
+    if result.output and (verbose or result.status not in {"pass", "skip"}):
+        for line in result.output.splitlines()[-12:]:
+            print("  " + line)
+
+
+def selected_tests(all_tests, groups, only):
+    tests = [test for test in all_tests if test.group in groups]
+    if only:
+        tests = [
+            test for test in tests
+            if test.function in only or test.test_id in only
+        ]
+    return tests
+
+
+def valgrind_prefix():
+    valgrind = shutil.which("valgrind")
+    if not valgrind:
+        return None
+    return [
+        valgrind,
+        "--quiet",
+        "--leak-check=full",
+        "--show-leak-kinds=definite,indirect,possible",
+        "--errors-for-leak-kinds=definite,indirect,possible",
+        "--error-exitcode=97",
+    ]
+
+
+def memory_mode(args):
+    if args.valgrind:
+        return "valgrind"
+    if args.asan:
+        return "asan"
+    if args.leaks:
+        return "valgrind" if valgrind_prefix() else "asan"
+    return None
+
+
+def asan_options():
+    leak_flag = "detect_leaks=0" if platform.system() == "Darwin" else "detect_leaks=1"
+    return (
+        f"{leak_flag}:halt_on_error=1:abort_on_error=1:"
+        "allocator_may_return_null=1"
+    )
+
+
+def strict_failure(result: TestResult):
+    if result.kind == "probe":
+        return False
+    return result.status not in {"pass", "skip"}
+
+
+def write_json_report(path: Path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Portable 42 Libft tester with isolated crash-safe tests."
+    )
+    parser.add_argument("project", help="Path to the Libft project to test")
+    parser.add_argument("--mandatory", action="store_true",
+                        help="Run mandatory tests. This is the default.")
+    parser.add_argument("--bonus", action="store_true",
+                        help="Run subject bonus tests when configured.")
+    parser.add_argument("--all", action="store_true",
+                        help="Run mandatory and bonus tests.")
+    parser.add_argument("--leaks", action="store_true",
+                        help="Run memory checks: Valgrind if available, otherwise ASan.")
+    parser.add_argument("--asan", action="store_true",
+                        help="Run an AddressSanitizer/UBSan memory pass.")
+    parser.add_argument("--valgrind", action="store_true",
+                        help="Run a Valgrind leak pass.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print build logs and passing test output.")
+    parser.add_argument("--only", action="append",
+                        help="Run only a function or test id. Can be repeated or comma separated.")
+    parser.add_argument("--json", dest="json_path",
+                        help="Write a JSON report to the given path.")
+    parser.add_argument("--timeout", type=float, default=2.0,
+                        help="Per-test timeout in seconds. Default: 2.0")
+    parser.add_argument("--keep-tmp", action="store_true",
+                        help="Keep the temporary build directory.")
+    parser.add_argument("--no-color", action="store_true",
+                        help="Disable ANSI colors.")
+    args = parser.parse_args()
+
+    color = Color(sys.stdout.isatty() and not args.no_color)
+    project = Path(args.project).expanduser().resolve()
+    if not project.exists() or not project.is_dir():
+        print(color.red(f"Invalid project directory: {project}"), file=sys.stderr)
+        return 2
+
+    groups = choose_groups(args)
+    only = parse_only(args.only)
+    if groups == {"bonus"} and not BONUS_FUNCTIONS:
+        print(color.yellow("No bonus tests are configured for Libft subject v19.3."))
+        payload = {
+            "project": str(project),
+            "subject": "Libft v19.3",
+            "results": [],
+            "summary": {"total": 0, "failed": 0},
+        }
+        if args.json_path:
+            write_json_report(Path(args.json_path), payload)
+        return 0
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="libft-tester-"))
+    results: List[TestResult] = []
+    warnings = []
+    exit_code = 0
+
+    try:
+        copied_project = tmp_root / "project"
+        copy_project(project, copied_project)
+        print(color.blue("==> Building copied Libft project"))
+        build_target(copied_project, "bonus" in groups, args.verbose)
+        libft, warning = find_libft(copied_project)
+        if warning:
+            warnings.append(warning)
+            print(color.yellow("Warning: ") + warning)
+        symbols = exported_symbols(libft)
+        test_env = os.environ.copy()
+        test_env["LT_AVAILABLE_SYMBOLS"] = ";".join(sorted(symbols))
+
+        harness = tmp_root / "libft_harness"
+        compile_harness(libft, harness)
+        all_tests = load_tests(harness)
+        tests = selected_tests(all_tests, groups, only)
+
+        if not tests:
+            print(color.yellow("No tests matched the selected mode/filter."))
+            return 0
+
+        print(color.blue(f"==> Running {len(tests)} functional tests"))
+        for test in tests:
+            result = run_one(harness, test, args.timeout, env=test_env)
+            results.append(result)
+            print_result(color, result, args.verbose)
+
+        mode = memory_mode(args)
+        if mode:
+            if args.leaks and mode == "asan" and platform.system() == "Darwin":
+                warning = (
+                    "Valgrind was not found. macOS AddressSanitizer does not "
+                    "support LeakSanitizer here, so --leaks is running ASan/UBSan "
+                    "diagnostics without leak detection."
+                )
+                warnings.append(warning)
+                print(color.yellow("Warning: ") + warning)
+            memory_tests = [
+                test for test in tests
+                if test.kind not in {"probe", "allocfail"}
+            ]
+            if memory_tests:
+                mem_libft = libft
+                mem_env = test_env.copy()
+                if mode == "asan":
+                    asan_project = tmp_root / "project_asan"
+                    copy_project(project, asan_project)
+                    asan_flags = (
+                        "-Wall -Wextra -Werror -g -O0 "
+                        "-fsanitize=address,undefined -fno-omit-frame-pointer"
+                    )
+                    print(color.blue("==> Building copied Libft project with ASan flags"))
+                    build_target(
+                        asan_project,
+                        "bonus" in groups,
+                        args.verbose,
+                        make_vars=["CC=cc", f"CFLAGS={asan_flags}"],
+                    )
+                    mem_libft, mem_warning = find_libft(asan_project)
+                    if mem_warning:
+                        warnings.append(mem_warning)
+                        print(color.yellow("Warning: ") + mem_warning)
+                    mem_symbols = exported_symbols(mem_libft)
+                    mem_env["LT_AVAILABLE_SYMBOLS"] = ";".join(sorted(mem_symbols))
+                mem_harness = tmp_root / f"libft_harness_{mode}"
+                compile_harness(
+                    mem_libft,
+                    mem_harness,
+                    asan=(mode == "asan"),
+                    disable_alloc_wrap=True,
+                )
+                if mode == "valgrind":
+                    prefix = valgrind_prefix()
+                    if not prefix:
+                        raise TesterError("Valgrind was requested but was not found in PATH.")
+                    env = mem_env.copy()
+                else:
+                    prefix = None
+                    env = mem_env.copy()
+                    env["ASAN_OPTIONS"] = asan_options()
+                    env["UBSAN_OPTIONS"] = "halt_on_error=1:abort_on_error=1"
+                print(color.blue(f"==> Running {len(memory_tests)} {mode} memory tests"))
+                for test in memory_tests:
+                    result = run_one(
+                        mem_harness,
+                        test,
+                        max(args.timeout * 10, 10),
+                        phase=mode,
+                        command_prefix=prefix,
+                        env=env,
+                    )
+                    results.append(result)
+                    print_result(color, result, args.verbose)
+
+        failed = [result for result in results if strict_failure(result)]
+        warned = [result for result in results if result.status == "warn"]
+        passed = [result for result in results if result.status == "pass"]
+        skipped = [result for result in results if result.status == "skip"]
+
+        print(color.blue("==> Summary"))
+        print(f"Passed: {len(passed)}  Failed: {len(failed)}  Warnings: {len(warned)}  Skipped: {len(skipped)}")
+        if failed:
+            exit_code = 1
+            print(color.red("Failing required tests:"))
+            for result in failed[:20]:
+                sig = f" ({result.signal})" if result.signal else ""
+                print(f"  - {result.test_id}: {result.status}{sig}")
+            if len(failed) > 20:
+                print(f"  ... and {len(failed) - 20} more")
+        elif warned:
+            print(color.yellow("Required tests passed. Probe warnings do not affect exit code."))
+        else:
+            print(color.green("All required tests passed."))
+
+    except TesterError as exc:
+        print(color.red(str(exc)), file=sys.stderr)
+        exit_code = 2
+    finally:
+        payload = {
+            "project": str(project),
+            "subject": "Libft v19.3",
+            "temporary_directory": str(tmp_root),
+            "kept_temporary_directory": args.keep_tmp,
+            "warnings": warnings,
+            "results": [asdict(result) for result in results],
+            "summary": {
+                "total": len(results),
+                "failed": len([r for r in results if strict_failure(r)]),
+                "warnings": len([r for r in results if r.status == "warn"]),
+            },
+        }
+        if args.json_path:
+            write_json_report(Path(args.json_path), payload)
+            print(f"JSON report: {Path(args.json_path).resolve()}")
+        if args.keep_tmp:
+            print(f"Temporary directory kept: {tmp_root}")
+        else:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
