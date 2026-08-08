@@ -412,25 +412,57 @@ def run_one(harness: Path, test: HarnessTest, timeout: float, phase="functional"
 
 def format_status(color: Color, status: str):
     labels = {
-        "pass": color.green("PASS"),
-        "fail": color.red("FAIL"),
-        "missing": color.red("MISS"),
-        "crash": color.red("CRASH"),
-        "timeout": color.red("TIMEOUT"),
-        "warn": color.yellow("WARN"),
-        "skip": color.yellow("SKIP"),
-        "leak": color.red("LEAK"),
+        "pass": ("PASS", color.green),
+        "fail": ("FAIL", color.red),
+        "missing": ("MISS", color.red),
+        "crash": ("CRASH", color.red),
+        "timeout": ("TIMEOUT", color.red),
+        "warn": ("WARN", color.yellow),
+        "skip": ("SKIP", color.yellow),
+        "leak": ("LEAK", color.red),
     }
-    return labels.get(status, status.upper())
+    text, painter = labels.get(status, (status.upper(), lambda value: value))
+    return painter(f"{text:<7}")
 
 
-def print_result(color: Color, result: TestResult, verbose: bool):
+def print_section(color: Color, title: str):
+    print()
+    print(color.blue(title))
+    print(color.dim("-" * len(title)))
+
+
+def display_memory_mode(mode):
+    names = {
+        "asan": "ASan",
+        "valgrind": "Valgrind",
+    }
+    return names.get(mode, mode if mode else "off")
+
+
+def print_run_header(color: Color, project: Path, groups, only, args, mode):
+    selected = ", ".join(sorted(groups))
+    filters = ", ".join(sorted(only)) if only else "none"
+    memory = display_memory_mode(mode)
+
+    print(color.blue("libft-tester"))
+    print(f"Project : {project}")
+    print(f"Subject : Libft v19.3")
+    print(f"Mode    : {selected}")
+    print(f"Only    : {filters}")
+    print(f"Timeout : {args.timeout:g}s")
+    print(f"Memory  : {memory}")
+
+
+def print_result(color: Color, result: TestResult, verbose: bool,
+                 index: int, total: int):
     label = format_status(color, result.status)
-    phase = "" if result.phase == "functional" else f" {color.dim(result.phase)}"
-    sig = f" {result.signal}" if result.signal else ""
+    counter = f"[{index:03d}/{total:03d}]"
+    duration = f"{result.duration_ms:>5} ms"
+    sig = f"  {color.red(result.signal)}" if result.signal else ""
+    detail = color.dim(result.description)
     print(
-        f"[{label}]{phase} {result.test_id:<32} "
-        f"{color.dim(result.description)} ({result.duration_ms} ms){sig}"
+        f"{counter} {label} {result.test_id:<34} {duration}  "
+        f"{detail}{sig}"
     )
     if result.output and (verbose or result.status not in {"pass", "skip"}):
         for line in result.output.splitlines()[-12:]:
@@ -544,6 +576,7 @@ def main():
 
     groups = choose_groups(args)
     only = parse_only(args.only)
+    mode = memory_mode(args)
     if groups == {"bonus"} and not BONUS_FUNCTIONS:
         print(color.yellow("No bonus tests are configured for Libft subject v19.3."))
         payload = {
@@ -562,9 +595,11 @@ def main():
     exit_code = 0
 
     try:
+        print_run_header(color, project, groups, only, args, mode)
         copied_project = tmp_root / "project"
         copy_project(project, copied_project)
-        print(color.blue("==> Building copied Libft project"))
+        print_section(color, "Build")
+        print("Compiling a temporary copy of the submitted project.")
         build_target(copied_project, "bonus" in groups, args.verbose)
         libft, warning = find_libft(copied_project)
         if warning:
@@ -583,13 +618,13 @@ def main():
             print(color.yellow("No tests matched the selected mode/filter."))
             return 0
 
-        print(color.blue(f"==> Running {len(tests)} functional tests"))
-        for test in tests:
+        print_section(color, "Functional Tests")
+        print(f"Count: {len(tests)}")
+        for index, test in enumerate(tests, 1):
             result = run_one(harness, test, args.timeout, env=test_env)
             results.append(result)
-            print_result(color, result, args.verbose)
+            print_result(color, result, args.verbose, index, len(tests))
 
-        mode = memory_mode(args)
         if mode:
             if args.leaks and mode == "asan" and platform.system() == "Darwin":
                 warning = (
@@ -613,7 +648,8 @@ def main():
                         "-Wall -Wextra -Werror -g -O0 "
                         "-fsanitize=address,undefined -fno-omit-frame-pointer"
                     )
-                    print(color.blue("==> Building copied Libft project with ASan flags"))
+                    print_section(color, "ASan Build")
+                    print("Compiling a second temporary copy with sanitizer flags.")
                     build_target(
                         asan_project,
                         "bonus" in groups,
@@ -643,8 +679,10 @@ def main():
                     env = mem_env.copy()
                     env["ASAN_OPTIONS"] = asan_options()
                     env["UBSAN_OPTIONS"] = "halt_on_error=1:abort_on_error=1"
-                print(color.blue(f"==> Running {len(memory_tests)} {mode} memory tests"))
-                for test in memory_tests:
+                title = f"{display_memory_mode(mode)} Memory Tests"
+                print_section(color, title)
+                print(f"Count: {len(memory_tests)}")
+                for index, test in enumerate(memory_tests, 1):
                     result = run_one(
                         mem_harness,
                         test,
@@ -654,17 +692,21 @@ def main():
                         env=env,
                     )
                     results.append(result)
-                    print_result(color, result, args.verbose)
+                    print_result(color, result, args.verbose, index, len(memory_tests))
 
         failed = [result for result in results if strict_failure(result)]
         warned = [result for result in results if result.status == "warn"]
         passed = [result for result in results if result.status == "pass"]
         skipped = [result for result in results if result.status == "skip"]
 
-        print(color.blue("==> Summary"))
-        print(f"Passed: {len(passed)}  Failed: {len(failed)}  Warnings: {len(warned)}  Skipped: {len(skipped)}")
+        print_section(color, "Summary")
+        print(f"{'Passed':<10} {len(passed)}")
+        print(f"{'Failed':<10} {len(failed)}")
+        print(f"{'Warnings':<10} {len(warned)}")
+        print(f"{'Skipped':<10} {len(skipped)}")
         if failed:
             exit_code = 1
+            print()
             print(color.red("Failing required tests:"))
             for result in failed[:20]:
                 sig = f" ({result.signal})" if result.signal else ""

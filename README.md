@@ -84,6 +84,36 @@ Or disable it through the environment:
 LIBFT_TESTER_NO_UPDATE_CHECK=1 libft-tester .
 ```
 
+## Output
+
+The default output is grouped by phase and keeps result columns aligned:
+
+```text
+libft-tester
+Project : /path/to/libft
+Subject : Libft v19.3
+Mode    : mandatory
+Only    : ft_memset
+Timeout : 3s
+Memory  : off
+
+Build
+-----
+Compiling a temporary copy of the submitted project.
+
+Functional Tests
+----------------
+Count: 1
+[001/001] PASS    ft_memset.cases                        7 ms  return value, signed/wide byte conversion, len 0
+
+Summary
+-------
+Passed     1
+Failed     0
+Warnings   0
+Skipped    0
+```
+
 ## What it does
 
 - Copies the submitted Libft project into a temporary directory before building.
