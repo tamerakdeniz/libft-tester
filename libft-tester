@@ -635,6 +635,14 @@ def main():
         tests = selected_tests(all_tests, groups, only)
 
         if not tests:
+            if only:
+                selected = ", ".join(sorted(only))
+                print(
+                    color.red("No tests matched --only filter: ")
+                    + selected,
+                    file=sys.stderr,
+                )
+                return 2
             print(color.yellow("No tests matched the selected mode/filter."))
             return 0
 
