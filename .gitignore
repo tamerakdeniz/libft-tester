@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.o
+*.a
+*.dSYM/
+tmp/
+report.json
+en.subject.pdf
+en.norm.pdf
