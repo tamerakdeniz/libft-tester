@@ -21,6 +21,41 @@ make
 ./libft-tester ../libft --json report.json
 ```
 
+## Install globally
+
+Install a symlink into `~/.local/bin`:
+
+```sh
+make install
+```
+
+If `~/.local/bin` is not already in your shell `PATH`, add this line to your
+shell config (`~/.zshrc`, `~/.bashrc`, or equivalent):
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+After that, run the tester from any Libft project directory:
+
+```sh
+cd ../libft
+libft-tester . --all
+libft-tester . --only ft_memset
+```
+
+To install somewhere else:
+
+```sh
+make install PREFIX=/usr/local
+```
+
+To remove the symlink:
+
+```sh
+make uninstall
+```
+
 ## What it does
 
 - Copies the submitted Libft project into a temporary directory before building.
