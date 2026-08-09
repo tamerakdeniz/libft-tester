@@ -360,6 +360,9 @@ def classify_result(test, phase, returncode, output, duration_ms, timed_out=Fals
     elif returncode == 97 and phase == "valgrind":
         status = "leak"
         sig = None
+    elif phase == "leaks" and "0 leaks for 0 total leaked bytes." not in output:
+        status = "leak"
+        sig = None
     else:
         status = "fail"
         sig = None
@@ -435,6 +438,7 @@ def display_memory_mode(mode):
     names = {
         "asan": "ASan",
         "valgrind": "Valgrind",
+        "leaks": "Leaks (macOS)",
     }
     return names.get(mode, mode if mode else "off")
 
@@ -493,6 +497,13 @@ def valgrind_prefix():
     ]
 
 
+def leaks_prefix():
+    leaks = shutil.which("leaks")
+    if not leaks:
+        return None
+    return [leaks, "-atExit", "--"]
+
+
 def memory_mode(args):
     if args.valgrind:
         if platform.system() == "Darwin" and not valgrind_prefix():
@@ -501,7 +512,9 @@ def memory_mode(args):
     if args.asan:
         return "asan"
     if args.leaks:
-        return "valgrind" if valgrind_prefix() else "asan"
+        if valgrind_prefix():
+            return "valgrind"
+        return "leaks" if platform.system() == "Darwin" else "asan"
     return None
 
 
@@ -521,12 +534,6 @@ def memory_mode_warning(args, mode):
             "Valgrind was requested but was not found. On macOS, "
             "libft-tester is using ASan/UBSan instead. Apple's ASan does not "
             "support LeakSanitizer here, so this is not a strict leak check."
-        )
-    if args.leaks and not valgrind_prefix():
-        return (
-            "Valgrind was not found. macOS AddressSanitizer does not "
-            "support LeakSanitizer here, so --leaks is running ASan/UBSan "
-            "diagnostics without leak detection."
         )
     return None
 
@@ -698,6 +705,12 @@ def main():
                     if not prefix:
                         raise TesterError("Valgrind was requested but was not found in PATH.")
                     env = mem_env.copy()
+                elif mode == "leaks":
+                    prefix = leaks_prefix()
+                    if not prefix:
+                        raise TesterError("leaks command was not found in PATH.")
+                    env = mem_env.copy()
+                    env["MallocStackLogging"] = "1"
                 else:
                     prefix = None
                     env = mem_env.copy()
