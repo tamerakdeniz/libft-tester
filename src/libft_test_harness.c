@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE
+#endif
+
 #include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>

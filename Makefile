@@ -20,7 +20,7 @@ uninstall:
 
 test:
 	@python3 -c "from pathlib import Path; compile(Path('$(NAME)').read_text(), '$(NAME)', 'exec')"
-	@cc -Wall -Wextra -Werror -g -O0 -DLT_DISABLE_ALLOC_WRAP=1 src/libft_test_harness.c -o /tmp/libft_harness_syntax
+	@cc -Wall -Wextra -Werror -g -O0 -D_GNU_SOURCE -DLT_DISABLE_ALLOC_WRAP=1 src/libft_test_harness.c -o /tmp/libft_harness_syntax
 	@rm -f /tmp/libft_harness_syntax
 
 clean:

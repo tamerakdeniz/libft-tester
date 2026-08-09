@@ -304,7 +304,7 @@ def whole_archive_flags(libft: Path):
 def compile_harness(libft: Path, output: Path, asan=False, disable_alloc_wrap=False):
     if not HARNESS_SOURCE.exists():
         raise TesterError(f"Harness source missing: {HARNESS_SOURCE}")
-    cmd = ["cc", "-Wall", "-Wextra", "-Werror", "-g", "-O0"]
+    cmd = ["cc", "-Wall", "-Wextra", "-Werror", "-g", "-O0", "-D_GNU_SOURCE"]
     if asan:
         cmd += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
     if disable_alloc_wrap:
