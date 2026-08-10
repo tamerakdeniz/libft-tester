@@ -18,9 +18,17 @@ make
 ./libft-tester ../libft --asan
 ./libft-tester ../libft --verbose
 ./libft-tester ../libft --only ft_memmove
+./libft-tester ../libft --source-build
+./libft-tester ../libft --source-build --only ft_memmove
 ./libft-tester ../libft --json report.json
 ./libft-tester --update
 ```
+
+`--source-build` is for early/incomplete projects. It skips the submitted
+Makefile, compiles the available `.c` files directly into a temporary
+`libft.a`, and creates a temporary compatibility `libft.h` when the project has
+no header yet. With `--only`, it compiles only the matching function source file
+so a single function can be tested before the whole project builds.
 
 ## Memory Checks
 
@@ -215,6 +223,8 @@ Skipped    0
 
 - Copies the submitted Libft project into a temporary directory before building.
 - Runs `make all` in the copy, so the original project directory is not modified.
+- With `--source-build`, skips `make` and builds `libft.a` directly from
+  available `.c` files, with a temporary compatibility `libft.h` if needed.
 - Finds and links the produced `libft.a`.
 - Runs each test as a separate process with a timeout.
 - Reports crashes by signal name, including `SIGSEGV`, `SIGABRT`, `SIGBUS`, and

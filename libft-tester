@@ -33,6 +33,67 @@ MANDATORY_FUNCTIONS = {
 BONUS_FUNCTIONS = set()
 UPDATE_CHECK_TIMEOUT = 2.0
 
+COMPAT_LIBFT_HEADER = """\
+#ifndef LIBFT_H
+# define LIBFT_H
+
+# include <stddef.h>
+# include <stdlib.h>
+# include <unistd.h>
+
+typedef struct s_list
+{
+\tvoid\t\t\t*content;
+\tstruct s_list\t*next;
+}\tt_list;
+
+int\t\t\t\tft_isalpha(int c);
+int\t\t\t\tft_isdigit(int c);
+int\t\t\t\tft_isalnum(int c);
+int\t\t\t\tft_isascii(int c);
+int\t\t\t\tft_isprint(int c);
+size_t\t\t\tft_strlen(const char *s);
+void\t\t\t*ft_memset(void *b, int c, size_t len);
+void\t\t\tft_bzero(void *s, size_t n);
+void\t\t\t*ft_memcpy(void *dst, const void *src, size_t n);
+void\t\t\t*ft_memmove(void *dst, const void *src, size_t len);
+size_t\t\t\tft_strlcpy(char *dst, const char *src, size_t dstsize);
+size_t\t\t\tft_strlcat(char *dst, const char *src, size_t dstsize);
+int\t\t\t\tft_toupper(int c);
+int\t\t\t\tft_tolower(int c);
+char\t\t\t*ft_strchr(const char *s, int c);
+char\t\t\t*ft_strrchr(const char *s, int c);
+int\t\t\t\tft_strncmp(const char *s1, const char *s2, size_t n);
+void\t\t\t*ft_memchr(const void *s, int c, size_t n);
+int\t\t\t\tft_memcmp(const void *s1, const void *s2, size_t n);
+char\t\t\t*ft_strnstr(const char *big, const char *little, size_t len);
+int\t\t\t\tft_atoi(const char *nptr);
+void\t\t\t*ft_calloc(size_t nmemb, size_t size);
+char\t\t\t*ft_strdup(const char *s1);
+char\t\t\t*ft_substr(char const *s, unsigned int start, size_t len);
+char\t\t\t*ft_strjoin(char const *s1, char const *s2);
+char\t\t\t*ft_strtrim(char const *s1, char const *set);
+char\t\t\t**ft_split(char const *s, char c);
+char\t\t\t*ft_itoa(int n);
+char\t\t\t*ft_strmapi(char const *s, char (*f)(unsigned int, char));
+void\t\t\tft_striteri(char *s, void (*f)(unsigned int, char *));
+void\t\t\tft_putchar_fd(char c, int fd);
+void\t\t\tft_putstr_fd(char *s, int fd);
+void\t\t\tft_putendl_fd(char *s, int fd);
+void\t\t\tft_putnbr_fd(int n, int fd);
+t_list\t\t\t*ft_lstnew(void *content);
+void\t\t\tft_lstadd_front(t_list **lst, t_list *new_node);
+unsigned int\tft_lstsize(t_list *lst);
+t_list\t\t\t*ft_lstlast(t_list *lst);
+void\t\t\tft_lstadd_back(t_list **lst, t_list *new_node);
+void\t\t\tft_lstdelone(t_list *lst, void (*del)(void *));
+void\t\t\tft_lstclear(t_list **lst, void (*del)(void *));
+void\t\t\tft_lstiter(t_list *lst, void (*f)(void *));
+t_list\t\t\t*ft_lstmap(t_list *lst, void *(*f)(void *), void (*del)(void *));
+
+#endif
+"""
+
 
 class Color:
     def __init__(self, enabled: bool):
@@ -244,7 +305,168 @@ def parse_only(values):
     return selected
 
 
-def build_target(project_dir: Path, include_bonus: bool, verbose: bool, make_vars=None):
+def only_function_names(only):
+    names = set()
+    for item in only:
+        function = item.split(".", 1)[0]
+        if function.startswith("ft_"):
+            names.add(function)
+    return names
+
+
+def direct_source_candidates(project_dir: Path):
+    ignored_dirs = {
+        ".git", ".cache", ".idea", ".vscode", "__pycache__",
+        "test", "tests", "tester", "testers",
+    }
+    ignored_names = {"main.c", "test.c", "tests.c"}
+    sources = []
+    for source in project_dir.rglob("*.c"):
+        relative = source.relative_to(project_dir)
+        if any(part in ignored_dirs for part in relative.parts[:-1]):
+            continue
+        if source.name in ignored_names:
+            continue
+        sources.append(source)
+    return sorted(sources)
+
+
+def source_matches_selected(source: Path, selected_functions):
+    if not selected_functions:
+        return True
+    stem = source.stem
+    return any(
+        stem == function or stem.startswith(function + "_")
+        for function in selected_functions
+    )
+
+
+def ensure_compat_header(project_dir: Path):
+    root_header = project_dir / "libft.h"
+    if root_header.exists():
+        return []
+    written = []
+    candidates = [
+        root_header,
+        project_dir / "include" / "libft.h",
+        project_dir / "includes" / "libft.h",
+    ]
+    for header in candidates:
+        if header.exists():
+            continue
+        header.parent.mkdir(parents=True, exist_ok=True)
+        header.write_text(COMPAT_LIBFT_HEADER, encoding="utf-8")
+        written.append(header.relative_to(project_dir).as_posix())
+    return [
+        "Created temporary compatibility header(s): " + ", ".join(written)
+    ]
+
+
+def object_defines_main(object_file: Path):
+    result = run_command(["nm", "-g", str(object_file)], timeout=30)
+    if result.returncode != 0:
+        raise TesterError("nm failed while inspecting object file:\n" + result.stdout)
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        symbol = parts[-1]
+        symbol_type = parts[-2] if len(parts) >= 3 else parts[0]
+        if symbol in {"main", "_main"} and symbol_type.upper() != "U":
+            return True
+    return False
+
+
+def source_build_flags(project_dir: Path, asan=False):
+    root_header = project_dir / "libft.h"
+    flags = [
+        "-Wall", "-Wextra", "-Werror", "-g", "-O0", "-D_GNU_SOURCE",
+        "-I", str(project_dir),
+        "-I", str(project_dir / "include"),
+        "-I", str(project_dir / "includes"),
+    ]
+    if root_header.exists():
+        flags += ["-include", str(root_header)]
+    if asan:
+        flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+    return flags
+
+
+def add_empty_archive_member(project_dir: Path, objects_dir: Path, objects, asan=False):
+    source = objects_dir / "empty_archive_member.c"
+    object_file = objects_dir / "empty_archive_member.o"
+    source.write_text("int\tlibft_tester_empty_archive_member;\n", encoding="utf-8")
+    result = run_command(
+        [
+            "cc", *source_build_flags(project_dir, asan=asan),
+            "-c", str(source), "-o", str(object_file),
+        ],
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise TesterError(
+            "Could not create empty archive member:\n" + result.stdout
+        )
+    objects.append(object_file)
+
+
+def build_sources_direct(project_dir: Path, verbose: bool, only=None, asan=False):
+    selected_functions = only_function_names(only or set())
+    sources = [
+        source for source in direct_source_candidates(project_dir)
+        if source_matches_selected(source, selected_functions)
+    ]
+    warnings = ensure_compat_header(project_dir)
+    objects_dir = project_dir / ".libft-tester-objects"
+    objects_dir.mkdir(parents=True, exist_ok=True)
+    objects = []
+    skipped_main = []
+    for index, source in enumerate(sources, 1):
+        object_file = objects_dir / f"{index:04d}_{source.stem}.o"
+        cmd = [
+            "cc", *source_build_flags(project_dir, asan=asan),
+            "-c", str(source), "-o", str(object_file),
+        ]
+        compile_result = run_command(cmd, timeout=60)
+        if verbose and compile_result.stdout.strip():
+            print(compile_result.stdout.rstrip())
+        if compile_result.returncode != 0:
+            relative = source.relative_to(project_dir)
+            raise TesterError(
+                f"direct source build failed for {relative}:\n"
+                + compile_result.stdout
+            )
+        if object_defines_main(object_file):
+            skipped_main.append(source.relative_to(project_dir).as_posix())
+            continue
+        objects.append(object_file)
+    if selected_functions and not sources:
+        warnings.append(
+            "No source files matched --only; building an empty libft.a so "
+            "selected tests can report missing symbols."
+        )
+    if skipped_main:
+        warnings.append(
+            "Skipped source file(s) that define main: " + ", ".join(skipped_main)
+        )
+    if not objects:
+        warnings.append(
+            "No source files were compiled; using an empty compatibility archive."
+        )
+        add_empty_archive_member(project_dir, objects_dir, objects, asan=asan)
+    archive = project_dir / "libft.a"
+    if archive.exists():
+        archive.unlink()
+    archive_result = run_command(["ar", "rcs", str(archive), *map(str, objects)], timeout=30)
+    if archive_result.returncode != 0:
+        raise TesterError("ar failed while creating libft.a:\n" + archive_result.stdout)
+    return warnings
+
+
+def build_target(project_dir: Path, include_bonus: bool, verbose: bool,
+                 make_vars=None, source_build=False, only=None, asan=False):
+    if source_build:
+        return build_sources_direct(project_dir, verbose, only=only, asan=asan)
     make_vars = make_vars or []
     makefile = project_dir / "Makefile"
     if not makefile.exists():
@@ -265,6 +487,7 @@ def build_target(project_dir: Path, include_bonus: bool, verbose: bool, make_var
             print(bonus.stdout.rstrip())
         if bonus.returncode != 0:
             raise TesterError("make bonus failed:\n" + bonus.stdout)
+    return []
 
 
 def find_libft(project_dir: Path):
@@ -575,6 +798,12 @@ def main():
                         help="Print build logs and passing test output.")
     parser.add_argument("--only", action="append",
                         help="Run only a function or test id. Can be repeated or comma separated.")
+    parser.add_argument("--source-build", "--no-makefile", action="store_true",
+                        help=(
+                            "Build libft.a directly from available .c files instead of "
+                            "running Makefile. Creates a temporary compatibility libft.h "
+                            "when the project has no header."
+                        ))
     parser.add_argument("--json", dest="json_path",
                         help="Write a JSON report to the given path.")
     parser.add_argument("--timeout", type=float, default=2.0,
@@ -626,8 +855,20 @@ def main():
         copied_project = tmp_root / "project"
         copy_project(project, copied_project)
         print_section(color, "Build")
-        print("Compiling a temporary copy of the submitted project.")
-        build_target(copied_project, "bonus" in groups, args.verbose)
+        if args.source_build:
+            print("Compiling available source files directly into libft.a.")
+        else:
+            print("Compiling a temporary copy of the submitted project.")
+        build_warnings = build_target(
+            copied_project,
+            "bonus" in groups,
+            args.verbose,
+            source_build=args.source_build,
+            only=only,
+        )
+        for warning in build_warnings:
+            warnings.append(warning)
+            print(color.yellow("Warning: ") + warning)
         libft, warning = find_libft(copied_project)
         if warning:
             warnings.append(warning)
@@ -680,13 +921,27 @@ def main():
                         "-fsanitize=address,undefined -fno-omit-frame-pointer"
                     )
                     print_section(color, "ASan Build")
-                    print("Compiling a second temporary copy with sanitizer flags.")
-                    build_target(
-                        asan_project,
-                        "bonus" in groups,
-                        args.verbose,
-                        make_vars=["CC=cc", f"CFLAGS={asan_flags}"],
-                    )
+                    if args.source_build:
+                        print("Compiling available source files directly with sanitizer flags.")
+                        build_warnings = build_target(
+                            asan_project,
+                            "bonus" in groups,
+                            args.verbose,
+                            source_build=True,
+                            only=only,
+                            asan=True,
+                        )
+                    else:
+                        print("Compiling a second temporary copy with sanitizer flags.")
+                        build_warnings = build_target(
+                            asan_project,
+                            "bonus" in groups,
+                            args.verbose,
+                            make_vars=["CC=cc", f"CFLAGS={asan_flags}"],
+                        )
+                    for build_warning in build_warnings:
+                        warnings.append(build_warning)
+                        print(color.yellow("Warning: ") + build_warning)
                     mem_libft, mem_warning = find_libft(asan_project)
                     if mem_warning:
                         warnings.append(mem_warning)
