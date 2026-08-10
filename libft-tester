@@ -692,7 +692,12 @@ def print_result(color: Color, result: TestResult, verbose: bool,
         f"{detail}{sig}"
     )
     if result.output and (verbose or result.status not in {"pass", "skip"}):
-        for line in result.output.splitlines()[-12:]:
+        lines = result.output.splitlines()
+        max_lines = 24
+        if not verbose and len(lines) > max_lines:
+            print(f"  ... output truncated to last {max_lines} lines")
+            lines = lines[-max_lines:]
+        for line in lines:
             print("  " + line)
 
 
