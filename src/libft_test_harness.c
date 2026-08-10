@@ -92,8 +92,10 @@ static int	lt_has_symbol(const char *name)
 	const char	*cursor;
 
 	symbols = getenv("LT_AVAILABLE_SYMBOLS");
-	if (!symbols || !symbols[0])
+	if (!symbols)
 		return (1);
+	if (!symbols[0])
+		return (0);
 	name_len = strlen(name);
 	cursor = symbols;
 	while (*cursor)
