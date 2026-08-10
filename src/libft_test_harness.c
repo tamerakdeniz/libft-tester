@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -126,6 +127,8 @@ static int	lt_has_symbol(const char *name)
 			return (LT_MISSING); \
 		} \
 	} while (0)
+
+#define LT_MESSAGE_SIZE 4096
 
 #ifndef LT_DISABLE_ALLOC_WRAP
 static void		*(*g_real_malloc)(size_t);
@@ -425,6 +428,282 @@ static void	free_split(char **split)
 	free(split);
 }
 
+static size_t	lt_appendf(char *dst, size_t size, size_t used,
+	const char *format, ...)
+{
+	va_list	args;
+	int		written;
+
+	if (used >= size)
+		return (used);
+	va_start(args, format);
+	written = vsnprintf(dst + used, size - used, format, args);
+	va_end(args);
+	if (written < 0)
+		return (used);
+	if ((size_t)written >= size - used)
+		return (size - 1);
+	return (used + (size_t)written);
+}
+
+static void	lt_format_string(char *dst, size_t size, const char *value)
+{
+	size_t			used;
+	size_t			index;
+	unsigned char	ch;
+
+	if (!value)
+	{
+		snprintf(dst, size, "<NULL>");
+		return ;
+	}
+	used = lt_appendf(dst, size, 0, "\"");
+	index = 0;
+	while (value[index] && index < 80)
+	{
+		ch = (unsigned char)value[index];
+		if (ch == '\n')
+			used = lt_appendf(dst, size, used, "\\n");
+		else if (ch == '\t')
+			used = lt_appendf(dst, size, used, "\\t");
+		else if (ch == '\r')
+			used = lt_appendf(dst, size, used, "\\r");
+		else if (ch == '\v')
+			used = lt_appendf(dst, size, used, "\\v");
+		else if (ch == '\f')
+			used = lt_appendf(dst, size, used, "\\f");
+		else if (ch == '\\' || ch == '"')
+			used = lt_appendf(dst, size, used, "\\%c", ch);
+		else if (isprint(ch))
+			used = lt_appendf(dst, size, used, "%c", ch);
+		else
+			used = lt_appendf(dst, size, used, "\\x%02x", ch);
+		index++;
+	}
+	if (value[index])
+		used = lt_appendf(dst, size, used, "...");
+	(void)lt_appendf(dst, size, used, "\"");
+}
+
+static void	lt_format_bytes(char *dst, size_t size, const void *data, size_t len)
+{
+	const unsigned char	*bytes;
+	size_t				used;
+	size_t				index;
+	size_t				limit;
+
+	if (!data)
+	{
+		snprintf(dst, size, "<NULL>");
+		return ;
+	}
+	bytes = (const unsigned char *)data;
+	limit = len;
+	if (limit > 32)
+		limit = 32;
+	used = lt_appendf(dst, size, 0, "[");
+	index = 0;
+	while (index < limit)
+	{
+		used = lt_appendf(dst, size, used, "%s%02x",
+				(index == 0) ? "" : " ", bytes[index]);
+		index++;
+	}
+	if (len > limit)
+		used = lt_appendf(dst, size, used, " ... (%zu bytes total)", len);
+	(void)lt_appendf(dst, size, used, "]");
+}
+
+static size_t	lt_first_byte_diff(const unsigned char *actual,
+	const unsigned char *expected, size_t len)
+{
+	size_t	index;
+
+	index = 0;
+	while (index < len)
+	{
+		if (actual[index] != expected[index])
+			return (index);
+		index++;
+	}
+	return (len);
+}
+
+static void	lt_format_ptr(char *dst, size_t size, const void *ptr,
+	const void *base, size_t len)
+{
+	uintptr_t	address;
+	uintptr_t	start;
+	uintptr_t	end;
+
+	if (!ptr)
+	{
+		snprintf(dst, size, "<NULL>");
+		return ;
+	}
+	if (base)
+	{
+		address = (uintptr_t)ptr;
+		start = (uintptr_t)base;
+		end = start + len;
+		if (address >= start && address <= end)
+		{
+			snprintf(dst, size, "base + %zu (%p)",
+				(size_t)(address - start), ptr);
+			return ;
+		}
+	}
+	snprintf(dst, size, "%p", ptr);
+}
+
+static int	lt_check_size(char *message, size_t size, const char *call,
+	const char *input, size_t actual, size_t expected)
+{
+	if (actual == expected)
+		return (1);
+	snprintf(message, size,
+		"call: %s\ninput: %s\nexpected return: %zu\nactual return: %zu",
+		call, input, expected, actual);
+	return (0);
+}
+
+static int	lt_check_int(char *message, size_t size, const char *call,
+	const char *input, long long actual, long long expected)
+{
+	if (actual == expected)
+		return (1);
+	snprintf(message, size,
+		"call: %s\ninput: %s\nexpected return: %lld\nactual return: %lld",
+		call, input, expected, actual);
+	return (0);
+}
+
+static int	lt_check_sign(char *message, size_t size, const char *call,
+	const char *input, int actual, int expected)
+{
+	if (same_sign(actual, expected))
+		return (1);
+	snprintf(message, size,
+		"call: %s\ninput: %s\nexpected sign/value like libc: %d\nactual return: %d",
+		call, input, expected, actual);
+	return (0);
+}
+
+static int	lt_check_string(char *message, size_t size, const char *call,
+	const char *input, const char *actual, const char *expected)
+{
+	char	actual_fmt[256];
+	char	expected_fmt[256];
+
+	if ((!actual && !expected) || (actual && expected && strcmp(actual, expected) == 0))
+		return (1);
+	lt_format_string(actual_fmt, sizeof(actual_fmt), actual);
+	lt_format_string(expected_fmt, sizeof(expected_fmt), expected);
+	snprintf(message, size,
+		"call: %s\ninput: %s\nexpected string: %s\nactual string: %s",
+		call, input, expected_fmt, actual_fmt);
+	return (0);
+}
+
+static int	lt_check_bytes(char *message, size_t size, const char *call,
+	const char *input, const void *actual, const void *expected, size_t len)
+{
+	char				actual_fmt[256];
+	char				expected_fmt[256];
+	size_t				diff;
+	const unsigned char	*actual_bytes;
+	const unsigned char	*expected_bytes;
+
+	if (actual && expected && memcmp(actual, expected, len) == 0)
+		return (1);
+	lt_format_bytes(actual_fmt, sizeof(actual_fmt), actual, len);
+	lt_format_bytes(expected_fmt, sizeof(expected_fmt), expected, len);
+	if (!actual || !expected)
+	{
+		snprintf(message, size,
+			"call: %s\ninput: %s\nexpected bytes: %s\nactual bytes: %s",
+			call, input, expected_fmt, actual_fmt);
+		return (0);
+	}
+	actual_bytes = (const unsigned char *)actual;
+	expected_bytes = (const unsigned char *)expected;
+	diff = lt_first_byte_diff(actual_bytes, expected_bytes, len);
+	snprintf(message, size,
+		"call: %s\ninput: %s\nexpected bytes: %s\nactual bytes: %s\n"
+		"first diff: index %zu expected 0x%02x actual 0x%02x",
+		call, input, expected_fmt, actual_fmt, diff,
+		expected_bytes[diff], actual_bytes[diff]);
+	return (0);
+}
+
+static int	lt_check_ptr(char *message, size_t size, const char *call,
+	const char *input, const void *actual, const void *expected,
+	const void *base, size_t len)
+{
+	char	actual_fmt[128];
+	char	expected_fmt[128];
+
+	if (actual == expected)
+		return (1);
+	lt_format_ptr(actual_fmt, sizeof(actual_fmt), actual, base, len);
+	lt_format_ptr(expected_fmt, sizeof(expected_fmt), expected, base, len);
+	snprintf(message, size,
+		"call: %s\ninput: %s\nexpected pointer: %s\nactual pointer: %s",
+		call, input, expected_fmt, actual_fmt);
+	return (0);
+}
+
+#define LT_EXPECT_SIZE(call, input, actual_expr, expected_expr) \
+	do { \
+		size_t lt_actual_value = (actual_expr); \
+		size_t lt_expected_value = (expected_expr); \
+		if (!lt_check_size(message, size, call, input, \
+				lt_actual_value, lt_expected_value)) \
+			return (LT_FAIL); \
+	} while (0)
+
+#define LT_EXPECT_INT(call, input, actual_expr, expected_expr) \
+	do { \
+		long long lt_actual_value = (long long)(actual_expr); \
+		long long lt_expected_value = (long long)(expected_expr); \
+		if (!lt_check_int(message, size, call, input, \
+				lt_actual_value, lt_expected_value)) \
+			return (LT_FAIL); \
+	} while (0)
+
+#define LT_EXPECT_SIGN(call, input, actual_expr, expected_expr) \
+	do { \
+		int lt_actual_value = (actual_expr); \
+		int lt_expected_value = (expected_expr); \
+		if (!lt_check_sign(message, size, call, input, \
+				lt_actual_value, lt_expected_value)) \
+			return (LT_FAIL); \
+	} while (0)
+
+#define LT_EXPECT_STRING(call, input, actual_expr, expected_expr) \
+	do { \
+		const char *lt_actual_value = (actual_expr); \
+		const char *lt_expected_value = (expected_expr); \
+		if (!lt_check_string(message, size, call, input, \
+				lt_actual_value, lt_expected_value)) \
+			return (LT_FAIL); \
+	} while (0)
+
+#define LT_EXPECT_BYTES(call, input, actual, expected, len) \
+	do { \
+		if (!lt_check_bytes(message, size, call, input, actual, expected, len)) \
+			return (LT_FAIL); \
+	} while (0)
+
+#define LT_EXPECT_PTR(call, input, actual_expr, expected_expr, base, len) \
+	do { \
+		const void *lt_actual_value = (actual_expr); \
+		const void *lt_expected_value = (expected_expr); \
+		if (!lt_check_ptr(message, size, call, input, \
+				lt_actual_value, lt_expected_value, base, len)) \
+			return (LT_FAIL); \
+	} while (0)
+
 static t_lt_result	test_isalpha_ascii(char *message, size_t size)
 {
 	int	c;
@@ -522,17 +801,20 @@ static t_lt_result	test_strlen_cases(char *message, size_t size)
 	size_t	index;
 
 	LT_REQUIRE(ft_strlen);
-	LT_CHECK(ft_strlen("") == 0, "empty string length mismatch");
-	LT_CHECK(ft_strlen("libft") == 5, "basic string length mismatch");
-	LT_CHECK(ft_strlen("abc\0hidden") == 3, "embedded NUL length mismatch");
+	LT_EXPECT_SIZE("ft_strlen(\"\")", "s=\"\"", ft_strlen(""), 0);
+	LT_EXPECT_SIZE("ft_strlen(\"libft\")", "s=\"libft\"",
+		ft_strlen("libft"), 5);
+	LT_EXPECT_SIZE("ft_strlen(\"abc\\0hidden\")",
+		"s contains bytes [61 62 63 00 68 69 64 64 65 6e]",
+		ft_strlen("abc\0hidden"), 3);
 	large = malloc(1024 * 1024 + 1);
 	LT_CHECK(large != NULL, "tester allocation failed");
 	index = 0;
 	while (index < 1024 * 1024)
 		large[index++] = 'x';
 	large[index] = '\0';
-	LT_CHECK(ft_strlen(large) == 1024 * 1024,
-		"large string length mismatch");
+	LT_EXPECT_SIZE("ft_strlen(large)", "large string: 1048576 x characters",
+		ft_strlen(large), 1024 * 1024);
 	free(large);
 	return (LT_PASS);
 }
@@ -543,6 +825,7 @@ static t_lt_result	test_memset_cases(char *message, size_t size)
 	unsigned char	expected[16];
 	void			*ret;
 	int				values[] = {-42, 0, 'A', 0xff, 0x100, 0x123, 4200, 0x1F600};
+	char			context[128];
 	size_t			index;
 
 	LT_REQUIRE(ft_memset);
@@ -553,17 +836,19 @@ static t_lt_result	test_memset_cases(char *message, size_t size)
 		memset(expected, 0x7a, sizeof(expected));
 		ret = ft_memset(buffer + 2, values[index], 8);
 		memset(expected + 2, (unsigned char)values[index], 8);
-		LT_CHECK(ret == buffer + 2,
-			"ft_memset did not return the destination for c=%d",
-			values[index]);
-		LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
-			"ft_memset wrote wrong byte for c=%d, expected 0x%02x",
+		snprintf(context, sizeof(context),
+			"buffer initialized to 0x7a; c=%d (as unsigned char 0x%02x); len=8",
 			values[index], (unsigned char)values[index]);
+		LT_EXPECT_PTR("ft_memset(buffer + 2, c, 8)",
+			context, ret, buffer + 2, buffer, sizeof(buffer));
+		LT_EXPECT_BYTES("ft_memset(buffer + 2, c, 8)",
+			context, buffer, expected, sizeof(buffer));
 		index++;
 	}
 	ft_memset(buffer, 0xff, 0);
-	LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
-		"ft_memset changed buffer with len 0");
+	LT_EXPECT_BYTES("ft_memset(buffer, 0xff, 0)",
+		"len=0 must leave the buffer unchanged",
+		buffer, expected, sizeof(buffer));
 	return (LT_PASS);
 }
 
@@ -577,11 +862,13 @@ static t_lt_result	test_bzero_cases(char *message, size_t size)
 	memset(expected, 0xab, sizeof(expected));
 	ft_bzero(buffer + 3, 5);
 	memset(expected + 3, 0, 5);
-	LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
-		"ft_bzero wrote unexpected bytes");
+	LT_EXPECT_BYTES("ft_bzero(buffer + 3, 5)",
+		"buffer initialized to 0xab; zero 5 bytes starting at index 3",
+		buffer, expected, sizeof(buffer));
 	ft_bzero(buffer, 0);
-	LT_CHECK(memcmp(buffer, expected, sizeof(buffer)) == 0,
-		"ft_bzero changed buffer with len 0");
+	LT_EXPECT_BYTES("ft_bzero(buffer, 0)",
+		"len=0 must leave the buffer unchanged",
+		buffer, expected, sizeof(buffer));
 	return (LT_PASS);
 }
 
@@ -597,12 +884,16 @@ static t_lt_result	test_memcpy_cases(char *message, size_t size)
 	memset(expected, 0xcc, sizeof(expected));
 	ret = ft_memcpy(dst + 1, src, 7);
 	memcpy(expected + 1, src, 7);
-	LT_CHECK(ret == dst + 1, "ft_memcpy did not return the destination");
-	LT_CHECK(memcmp(dst, expected, sizeof(dst)) == 0,
-		"ft_memcpy copied unexpected bytes");
+	LT_EXPECT_PTR("ft_memcpy(dst + 1, src, 7)",
+		"dst initialized to 0xcc; src bytes [61 62 00 64 65 66 67 68 69 ff]",
+		ret, dst + 1, dst, sizeof(dst));
+	LT_EXPECT_BYTES("ft_memcpy(dst + 1, src, 7)",
+		"copy 7 bytes from src into dst+1; dst initially all 0xcc",
+		dst, expected, sizeof(dst));
 	ft_memcpy(dst, src, 0);
-	LT_CHECK(memcmp(dst, expected, sizeof(dst)) == 0,
-		"ft_memcpy changed buffer with len 0");
+	LT_EXPECT_BYTES("ft_memcpy(dst, src, 0)",
+		"len=0 must leave dst unchanged",
+		dst, expected, sizeof(dst));
 	return (LT_PASS);
 }
 
@@ -622,8 +913,9 @@ static t_lt_result	test_memmove_overlap(char *message, size_t size)
 	}
 	ft_memmove(left + 7, left, 31);
 	memmove(right + 7, right, 31);
-	LT_CHECK(memcmp(left, right, sizeof(left)) == 0,
-		"forward overlap result differs from memmove");
+	LT_EXPECT_BYTES("ft_memmove(left + 7, left, 31)",
+		"forward overlap; initial bytes are 0..63",
+		left, right, sizeof(left));
 	index = 0;
 	while (index < sizeof(left))
 	{
@@ -633,10 +925,12 @@ static t_lt_result	test_memmove_overlap(char *message, size_t size)
 	}
 	ft_memmove(left, left + 5, 37);
 	memmove(right, right + 5, 37);
-	LT_CHECK(memcmp(left, right, sizeof(left)) == 0,
-		"backward overlap result differs from memmove");
-	LT_CHECK(ft_memmove(left, right, 0) == left,
-		"ft_memmove did not return dst for len 0");
+	LT_EXPECT_BYTES("ft_memmove(left, left + 5, 37)",
+		"backward overlap; initial bytes are 255-index",
+		left, right, sizeof(left));
+	LT_EXPECT_PTR("ft_memmove(left, right, 0)",
+		"len=0 must return dst and leave memory unchanged",
+		ft_memmove(left, right, 0), left, left, sizeof(left));
 	return (LT_PASS);
 }
 
@@ -652,18 +946,25 @@ static t_lt_result	test_strlcpy_cases(char *message, size_t size)
 	memset(ref, 'X', sizeof(ref));
 	ret = ft_strlcpy(dst, "abcdef", sizeof(dst));
 	expected_ret = ref_strlcpy(ref, "abcdef", sizeof(ref));
-	LT_CHECK(ret == expected_ret && memcmp(dst, ref, sizeof(dst)) == 0,
-		"ft_strlcpy full copy mismatch");
+	LT_EXPECT_SIZE("ft_strlcpy(dst, \"abcdef\", 16)",
+		"dst initialized to X bytes", ret, expected_ret);
+	LT_EXPECT_BYTES("ft_strlcpy(dst, \"abcdef\", 16)",
+		"full copy; dst tail should remain unchanged after NUL",
+		dst, ref, sizeof(dst));
 	memset(dst, 'X', sizeof(dst));
 	memset(ref, 'X', sizeof(ref));
 	ret = ft_strlcpy(dst, "abcdef", 4);
 	expected_ret = ref_strlcpy(ref, "abcdef", 4);
-	LT_CHECK(ret == expected_ret && memcmp(dst, ref, sizeof(dst)) == 0,
-		"ft_strlcpy truncated copy mismatch");
+	LT_EXPECT_SIZE("ft_strlcpy(dst, \"abcdef\", 4)",
+		"dst initialized to X bytes", ret, expected_ret);
+	LT_EXPECT_BYTES("ft_strlcpy(dst, \"abcdef\", 4)",
+		"truncated copy; dstsize=4", dst, ref, sizeof(dst));
 	memset(dst, 'X', sizeof(dst));
 	ret = ft_strlcpy(dst, "abc", 0);
-	LT_CHECK(ret == 3 && dst[0] == 'X',
-		"ft_strlcpy size 0 return/write mismatch");
+	LT_EXPECT_SIZE("ft_strlcpy(dst, \"abc\", 0)",
+		"dstsize=0 must return src length", ret, 3);
+	LT_EXPECT_INT("dst[0] after ft_strlcpy(dst, \"abc\", 0)",
+		"dstsize=0 must not write to dst", dst[0], 'X');
 	return (LT_PASS);
 }
 
@@ -679,20 +980,26 @@ static t_lt_result	test_strlcat_cases(char *message, size_t size)
 	strcpy(ref, "abc");
 	ret = ft_strlcat(dst, "def", sizeof(dst));
 	expected_ret = ref_strlcat(ref, "def", sizeof(ref));
-	LT_CHECK(ret == expected_ret && strcmp(dst, ref) == 0,
-		"ft_strlcat append mismatch");
+	LT_EXPECT_SIZE("ft_strlcat(\"abc\", \"def\", 20)",
+		"dst=\"abc\", src=\"def\", dstsize=20", ret, expected_ret);
+	LT_EXPECT_STRING("ft_strlcat(\"abc\", \"def\", 20)",
+		"append without truncation", dst, ref);
 	memset(dst, 0, sizeof(dst));
 	memset(ref, 0, sizeof(ref));
 	strcpy(dst, "abc");
 	strcpy(ref, "abc");
 	ret = ft_strlcat(dst, "defgh", 6);
 	expected_ret = ref_strlcat(ref, "defgh", 6);
-	LT_CHECK(ret == expected_ret && memcmp(dst, ref, sizeof(dst)) == 0,
-		"ft_strlcat truncation mismatch");
+	LT_EXPECT_SIZE("ft_strlcat(\"abc\", \"defgh\", 6)",
+		"dst=\"abc\", src=\"defgh\", dstsize=6", ret, expected_ret);
+	LT_EXPECT_BYTES("ft_strlcat(\"abc\", \"defgh\", 6)",
+		"truncated append", dst, ref, sizeof(dst));
 	strcpy(dst, "abcdef");
 	ret = ft_strlcat(dst, "ZZ", 3);
-	LT_CHECK(ret == 5 && strcmp(dst, "abcdef") == 0,
-		"ft_strlcat dstsize smaller than dst length mismatch");
+	LT_EXPECT_SIZE("ft_strlcat(\"abcdef\", \"ZZ\", 3)",
+		"dstsize smaller than existing dst length", ret, 5);
+	LT_EXPECT_STRING("ft_strlcat(\"abcdef\", \"ZZ\", 3)",
+		"dst must remain unchanged", dst, "abcdef");
 	return (LT_PASS);
 }
 
@@ -743,16 +1050,23 @@ static t_lt_result	test_strchr_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_strchr);
 	s = "abacad";
-	LT_CHECK(ft_strchr(s, 'a') == s, "ft_strchr first occurrence mismatch");
-	LT_CHECK(ft_strchr(s, 'd') == s + 5, "ft_strchr last char mismatch");
-	LT_CHECK(ft_strchr(s, '\0') == s + 6, "ft_strchr NUL mismatch");
-	LT_CHECK(ft_strchr(s, 'z') == NULL, "ft_strchr missing char mismatch");
+	LT_EXPECT_PTR("ft_strchr(\"abacad\", 'a')", "s=\"abacad\", c='a'",
+		ft_strchr(s, 'a'), s, s, ref_strlen(s));
+	LT_EXPECT_PTR("ft_strchr(\"abacad\", 'd')", "s=\"abacad\", c='d'",
+		ft_strchr(s, 'd'), s + 5, s, ref_strlen(s));
+	LT_EXPECT_PTR("ft_strchr(\"abacad\", '\\0')",
+		"s=\"abacad\", c='\\0'", ft_strchr(s, '\0'), s + 6,
+		s, ref_strlen(s));
+	LT_EXPECT_PTR("ft_strchr(\"abacad\", 'z')", "s=\"abacad\", c='z'",
+		ft_strchr(s, 'z'), NULL, s, ref_strlen(s));
 	raw[0] = 'x';
 	raw[1] = 0xff;
 	raw[2] = 'y';
 	raw[3] = 0;
-	LT_CHECK(ft_strchr((char *)raw, 0xff) == (char *)raw + 1,
-		"ft_strchr unsigned char mismatch");
+	LT_EXPECT_PTR("ft_strchr(raw, 0xff)",
+		"raw bytes [78 ff 79 00], c=0xff",
+		ft_strchr((char *)raw, 0xff), (char *)raw + 1,
+		raw, sizeof(raw));
 	return (LT_PASS);
 }
 
@@ -762,25 +1076,34 @@ static t_lt_result	test_strrchr_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_strrchr);
 	s = "abacad";
-	LT_CHECK(ft_strrchr(s, 'a') == s + 4,
-		"ft_strrchr last occurrence mismatch");
-	LT_CHECK(ft_strrchr(s, 'd') == s + 5, "ft_strrchr last char mismatch");
-	LT_CHECK(ft_strrchr(s, '\0') == s + 6, "ft_strrchr NUL mismatch");
-	LT_CHECK(ft_strrchr(s, 'z') == NULL, "ft_strrchr missing char mismatch");
+	LT_EXPECT_PTR("ft_strrchr(\"abacad\", 'a')", "s=\"abacad\", c='a'",
+		ft_strrchr(s, 'a'), s + 4, s, ref_strlen(s));
+	LT_EXPECT_PTR("ft_strrchr(\"abacad\", 'd')", "s=\"abacad\", c='d'",
+		ft_strrchr(s, 'd'), s + 5, s, ref_strlen(s));
+	LT_EXPECT_PTR("ft_strrchr(\"abacad\", '\\0')",
+		"s=\"abacad\", c='\\0'", ft_strrchr(s, '\0'), s + 6,
+		s, ref_strlen(s));
+	LT_EXPECT_PTR("ft_strrchr(\"abacad\", 'z')", "s=\"abacad\", c='z'",
+		ft_strrchr(s, 'z'), NULL, s, ref_strlen(s));
 	return (LT_PASS);
 }
 
 static t_lt_result	test_strncmp_cases(char *message, size_t size)
 {
 	LT_REQUIRE(ft_strncmp);
-	LT_CHECK(ft_strncmp("abc", "abc", 3) == 0, "equal strings mismatch");
-	LT_CHECK(ft_strncmp("abc", "xyz", 0) == 0, "n=0 mismatch");
-	LT_CHECK(same_sign(ft_strncmp("abc", "abd", 3), strncmp("abc", "abd", 3)),
-		"negative comparison sign mismatch");
-	LT_CHECK(same_sign(ft_strncmp("abz", "abc", 3), strncmp("abz", "abc", 3)),
-		"positive comparison sign mismatch");
-	LT_CHECK(same_sign(ft_strncmp("a\200", "a\1", 2), strncmp("a\200", "a\1", 2)),
-		"unsigned char comparison sign mismatch");
+	LT_EXPECT_INT("ft_strncmp(\"abc\", \"abc\", 3)",
+		"s1=\"abc\", s2=\"abc\", n=3", ft_strncmp("abc", "abc", 3), 0);
+	LT_EXPECT_INT("ft_strncmp(\"abc\", \"xyz\", 0)",
+		"s1=\"abc\", s2=\"xyz\", n=0", ft_strncmp("abc", "xyz", 0), 0);
+	LT_EXPECT_SIGN("ft_strncmp(\"abc\", \"abd\", 3)",
+		"s1=\"abc\", s2=\"abd\", n=3",
+		ft_strncmp("abc", "abd", 3), strncmp("abc", "abd", 3));
+	LT_EXPECT_SIGN("ft_strncmp(\"abz\", \"abc\", 3)",
+		"s1=\"abz\", s2=\"abc\", n=3",
+		ft_strncmp("abz", "abc", 3), strncmp("abz", "abc", 3));
+	LT_EXPECT_SIGN("ft_strncmp(\"a\\200\", \"a\\1\", 2)",
+		"s1 bytes [61 80], s2 bytes [61 01], n=2",
+		ft_strncmp("a\200", "a\1", 2), strncmp("a\200", "a\1", 2));
 	return (LT_PASS);
 }
 
@@ -789,16 +1112,24 @@ static t_lt_result	test_memchr_cases(char *message, size_t size)
 	unsigned char	buffer[8] = {'a', 0, 'b', 0xff, 'c', 'b', 0, 'd'};
 
 	LT_REQUIRE(ft_memchr);
-	LT_CHECK(ft_memchr(buffer, 0, sizeof(buffer)) == buffer + 1,
-		"ft_memchr NUL mismatch");
-	LT_CHECK(ft_memchr(buffer, 0xff, sizeof(buffer)) == buffer + 3,
-		"ft_memchr high byte mismatch");
-	LT_CHECK(ft_memchr(buffer, 'b', 4) == buffer + 2,
-		"ft_memchr bounded search mismatch");
-	LT_CHECK(ft_memchr(buffer, 'z', sizeof(buffer)) == NULL,
-		"ft_memchr missing byte mismatch");
-	LT_CHECK(ft_memchr(buffer, 'a', 0) == NULL,
-		"ft_memchr n=0 mismatch");
+	LT_EXPECT_PTR("ft_memchr(buffer, 0, 8)",
+		"buffer bytes [61 00 62 ff 63 62 00 64], c=0, n=8",
+		ft_memchr(buffer, 0, sizeof(buffer)), buffer + 1,
+		buffer, sizeof(buffer));
+	LT_EXPECT_PTR("ft_memchr(buffer, 0xff, 8)",
+		"buffer bytes [61 00 62 ff 63 62 00 64], c=0xff, n=8",
+		ft_memchr(buffer, 0xff, sizeof(buffer)), buffer + 3,
+		buffer, sizeof(buffer));
+	LT_EXPECT_PTR("ft_memchr(buffer, 'b', 4)",
+		"buffer bytes [61 00 62 ff 63 62 00 64], c='b', n=4",
+		ft_memchr(buffer, 'b', 4), buffer + 2, buffer, sizeof(buffer));
+	LT_EXPECT_PTR("ft_memchr(buffer, 'z', 8)",
+		"buffer bytes [61 00 62 ff 63 62 00 64], c='z', n=8",
+		ft_memchr(buffer, 'z', sizeof(buffer)), NULL,
+		buffer, sizeof(buffer));
+	LT_EXPECT_PTR("ft_memchr(buffer, 'a', 0)",
+		"n=0 must not inspect bytes", ft_memchr(buffer, 'a', 0),
+		NULL, buffer, sizeof(buffer));
 	return (LT_PASS);
 }
 
@@ -808,13 +1139,19 @@ static t_lt_result	test_memcmp_cases(char *message, size_t size)
 	unsigned char	b[4] = {0, 1, 0x7f, 0xff};
 
 	LT_REQUIRE(ft_memcmp);
-	LT_CHECK(ft_memcmp(a, a, sizeof(a)) == 0, "same buffer mismatch");
-	LT_CHECK(ft_memcmp(a, b, 2) == 0, "prefix equality mismatch");
-	LT_CHECK(ft_memcmp(a, b, 0) == 0, "n=0 mismatch");
-	LT_CHECK(same_sign(ft_memcmp(a, b, sizeof(a)), memcmp(a, b, sizeof(a))),
-		"unsigned byte comparison sign mismatch");
-	LT_CHECK(same_sign(ft_memcmp(b, a, sizeof(a)), memcmp(b, a, sizeof(a))),
-		"reverse comparison sign mismatch");
+	LT_EXPECT_INT("ft_memcmp(a, a, 4)",
+		"a bytes [00 01 80 ff], n=4", ft_memcmp(a, a, sizeof(a)), 0);
+	LT_EXPECT_INT("ft_memcmp(a, b, 2)",
+		"a bytes [00 01 80 ff], b bytes [00 01 7f ff], n=2",
+		ft_memcmp(a, b, 2), 0);
+	LT_EXPECT_INT("ft_memcmp(a, b, 0)",
+		"n=0 must return 0", ft_memcmp(a, b, 0), 0);
+	LT_EXPECT_SIGN("ft_memcmp(a, b, 4)",
+		"a bytes [00 01 80 ff], b bytes [00 01 7f ff], n=4",
+		ft_memcmp(a, b, sizeof(a)), memcmp(a, b, sizeof(a)));
+	LT_EXPECT_SIGN("ft_memcmp(b, a, 4)",
+		"b bytes [00 01 7f ff], a bytes [00 01 80 ff], n=4",
+		ft_memcmp(b, a, sizeof(a)), memcmp(b, a, sizeof(a)));
 	return (LT_PASS);
 }
 
@@ -825,6 +1162,7 @@ static t_lt_result	test_strnstr_cases(char *message, size_t size)
 	size_t		lens[] = {0, 1, 5, 9, 15, 43};
 	size_t		i;
 	size_t		j;
+	char		context[160];
 
 	LT_REQUIRE(ft_strnstr);
 	haystack = "the quick brown fox jumps over the lazy dog";
@@ -834,10 +1172,13 @@ static t_lt_result	test_strnstr_cases(char *message, size_t size)
 		j = 0;
 		while (j < sizeof(lens) / sizeof(lens[0]))
 		{
-			LT_CHECK(ft_strnstr(haystack, needles[i], lens[j])
-				== ref_strnstr(haystack, needles[i], lens[j]),
-				"ft_strnstr mismatch for needle '%s' len %zu",
-				needles[i], lens[j]);
+			snprintf(context, sizeof(context),
+				"haystack=\"%s\", needle=\"%s\", len=%zu",
+				haystack, needles[i], lens[j]);
+			LT_EXPECT_PTR("ft_strnstr(haystack, needle, len)",
+				context, ft_strnstr(haystack, needles[i], lens[j]),
+				ref_strnstr(haystack, needles[i], lens[j]),
+				haystack, ref_strlen(haystack));
 			j++;
 		}
 		i++;
@@ -858,15 +1199,15 @@ static t_lt_result	test_atoi_cases(char *message, size_t size)
 		{"words", 0}, {"--12", 0}, {"+-12", 0}, {"12words34", 12}
 	};
 	size_t			index;
+	char			context[128];
 
 	LT_REQUIRE(ft_atoi);
 	index = 0;
 	while (index < sizeof(cases) / sizeof(cases[0]))
 	{
-		LT_CHECK(ft_atoi(cases[index].input) == cases[index].expected,
-			"ft_atoi('%s') returned %d, expected %d",
-			cases[index].input, ft_atoi(cases[index].input),
-			cases[index].expected);
+		lt_format_string(context, sizeof(context), cases[index].input);
+		LT_EXPECT_INT("ft_atoi(input)", context,
+			ft_atoi(cases[index].input), cases[index].expected);
 		index++;
 	}
 	return (LT_PASS);
@@ -876,25 +1217,38 @@ static t_lt_result	test_calloc_cases(char *message, size_t size)
 {
 	unsigned char	*ptr;
 	size_t			index;
+	char			context[128];
 
 	LT_REQUIRE(ft_calloc);
 	ptr = ft_calloc(32, sizeof(unsigned char));
-	LT_CHECK(ptr != NULL, "ft_calloc returned NULL for small allocation");
+	LT_CHECK(ptr != NULL,
+		"call: ft_calloc(32, sizeof(unsigned char))\n"
+		"expected: non-NULL pointer to 32 zeroed bytes\nactual pointer: <NULL>");
 	index = 0;
 	while (index < 32)
 	{
-		LT_CHECK(ptr[index] == 0, "ft_calloc did not zero byte %zu", index);
+		snprintf(context, sizeof(context),
+			"nmemb=32, size=1, checking byte index %zu", index);
+		LT_EXPECT_INT("ptr[index] after ft_calloc(32, 1)",
+			context, ptr[index], 0);
 		index++;
 	}
 	free(ptr);
 	ptr = ft_calloc(0, 16);
-	LT_CHECK(ptr != NULL, "ft_calloc(0, size) must return a freeable pointer");
+	LT_CHECK(ptr != NULL,
+		"call: ft_calloc(0, 16)\n"
+		"expected: non-NULL freeable pointer\nactual pointer: <NULL>");
 	free(ptr);
 	ptr = ft_calloc(16, 0);
-	LT_CHECK(ptr != NULL, "ft_calloc(nmemb, 0) must return a freeable pointer");
+	LT_CHECK(ptr != NULL,
+		"call: ft_calloc(16, 0)\n"
+		"expected: non-NULL freeable pointer\nactual pointer: <NULL>");
 	free(ptr);
 	ptr = ft_calloc(((size_t)-1 / 2) + 1, 2);
-	LT_CHECK(ptr == NULL, "ft_calloc did not reject size_t overflow");
+	LT_CHECK(ptr == NULL,
+		"call: ft_calloc(((size_t)-1 / 2) + 1, 2)\n"
+		"expected pointer: <NULL> because nmemb * size overflows\n"
+		"actual pointer: %p", ptr);
 	return (LT_PASS);
 }
 
@@ -905,14 +1259,13 @@ static t_lt_result	test_strdup_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_strdup);
 	copy = ft_strdup("hello");
-	LT_CHECK(copy != NULL, "ft_strdup returned NULL for basic string");
-	LT_CHECK(strcmp(copy, "hello") == 0, "ft_strdup content mismatch");
+	LT_EXPECT_STRING("ft_strdup(\"hello\")", "s=\"hello\"", copy, "hello");
 	copy[0] = 'H';
-	LT_CHECK(strcmp(copy, "Hello") == 0, "ft_strdup result is not writable");
+	LT_EXPECT_STRING("copy after copy[0] = 'H'",
+		"ft_strdup result must be writable independent storage", copy, "Hello");
 	free(copy);
 	copy = ft_strdup(empty);
-	LT_CHECK(copy != NULL && strcmp(copy, "") == 0,
-		"ft_strdup empty string mismatch");
+	LT_EXPECT_STRING("ft_strdup(\"\")", "s=\"\"", copy, "");
 	free(copy);
 	return (LT_PASS);
 }
@@ -923,20 +1276,20 @@ static t_lt_result	test_substr_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_substr);
 	result = ft_substr("hello world", 6, 5);
-	LT_CHECK(result != NULL && strcmp(result, "world") == 0,
-		"ft_substr normal case mismatch");
+	LT_EXPECT_STRING("ft_substr(\"hello world\", 6, 5)",
+		"s=\"hello world\", start=6, len=5", result, "world");
 	free(result);
 	result = ft_substr("short", 20, 10);
-	LT_CHECK(result != NULL && strcmp(result, "") == 0,
-		"ft_substr start beyond length must return empty string");
+	LT_EXPECT_STRING("ft_substr(\"short\", 20, 10)",
+		"s=\"short\", start beyond length, len=10", result, "");
 	free(result);
 	result = ft_substr("abcdef", 2, 100);
-	LT_CHECK(result != NULL && strcmp(result, "cdef") == 0,
-		"ft_substr long len mismatch");
+	LT_EXPECT_STRING("ft_substr(\"abcdef\", 2, 100)",
+		"s=\"abcdef\", start=2, len longer than remainder", result, "cdef");
 	free(result);
 	result = ft_substr("abcdef", 2, 0);
-	LT_CHECK(result != NULL && strcmp(result, "") == 0,
-		"ft_substr len 0 mismatch");
+	LT_EXPECT_STRING("ft_substr(\"abcdef\", 2, 0)",
+		"s=\"abcdef\", start=2, len=0", result, "");
 	free(result);
 	return (LT_PASS);
 }
@@ -947,16 +1300,16 @@ static t_lt_result	test_strjoin_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_strjoin);
 	result = ft_strjoin("hello", " world");
-	LT_CHECK(result != NULL && strcmp(result, "hello world") == 0,
-		"ft_strjoin basic mismatch");
+	LT_EXPECT_STRING("ft_strjoin(\"hello\", \" world\")",
+		"s1=\"hello\", s2=\" world\"", result, "hello world");
 	free(result);
 	result = ft_strjoin("", "tail");
-	LT_CHECK(result != NULL && strcmp(result, "tail") == 0,
-		"ft_strjoin empty prefix mismatch");
+	LT_EXPECT_STRING("ft_strjoin(\"\", \"tail\")",
+		"s1=\"\", s2=\"tail\"", result, "tail");
 	free(result);
 	result = ft_strjoin("head", "");
-	LT_CHECK(result != NULL && strcmp(result, "head") == 0,
-		"ft_strjoin empty suffix mismatch");
+	LT_EXPECT_STRING("ft_strjoin(\"head\", \"\")",
+		"s1=\"head\", s2=\"\"", result, "head");
 	free(result);
 	return (LT_PASS);
 }
@@ -967,20 +1320,20 @@ static t_lt_result	test_strtrim_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_strtrim);
 	result = ft_strtrim(" \t\nhello \n", " \n\t");
-	LT_CHECK(result != NULL && strcmp(result, "hello") == 0,
-		"ft_strtrim basic mismatch");
+	LT_EXPECT_STRING("ft_strtrim(\" \\t\\nhello \\n\", \" \\n\\t\")",
+		"s1=\" \\t\\nhello \\n\", set=\" \\n\\t\"", result, "hello");
 	free(result);
 	result = ft_strtrim("xxxx", "x");
-	LT_CHECK(result != NULL && strcmp(result, "") == 0,
-		"ft_strtrim all-trimmed mismatch");
+	LT_EXPECT_STRING("ft_strtrim(\"xxxx\", \"x\")",
+		"s1=\"xxxx\", set=\"x\"", result, "");
 	free(result);
 	result = ft_strtrim("abc", "");
-	LT_CHECK(result != NULL && strcmp(result, "abc") == 0,
-		"ft_strtrim empty set mismatch");
+	LT_EXPECT_STRING("ft_strtrim(\"abc\", \"\")",
+		"s1=\"abc\", set=\"\"", result, "abc");
 	free(result);
 	result = ft_strtrim("", "abc");
-	LT_CHECK(result != NULL && strcmp(result, "") == 0,
-		"ft_strtrim empty string mismatch");
+	LT_EXPECT_STRING("ft_strtrim(\"\", \"abc\")",
+		"s1=\"\", set=\"abc\"", result, "");
 	free(result);
 	return (LT_PASS);
 }
@@ -991,26 +1344,44 @@ static t_lt_result	test_split_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_split);
 	result = ft_split(",,alpha,beta,,gamma,", ',');
-	LT_CHECK(result != NULL, "ft_split returned NULL for basic case");
-	LT_CHECK(result[0] && strcmp(result[0], "alpha") == 0,
-		"ft_split word 0 mismatch");
-	LT_CHECK(result[1] && strcmp(result[1], "beta") == 0,
-		"ft_split word 1 mismatch");
-	LT_CHECK(result[2] && strcmp(result[2], "gamma") == 0,
-		"ft_split word 2 mismatch");
-	LT_CHECK(result[3] == NULL, "ft_split array is not NULL terminated");
+	LT_CHECK(result != NULL,
+		"call: ft_split(\",,alpha,beta,,gamma,\", ',')\n"
+		"expected: non-NULL array [\"alpha\", \"beta\", \"gamma\", NULL]\n"
+		"actual pointer: <NULL>");
+	LT_EXPECT_STRING("ft_split(\",,alpha,beta,,gamma,\", ',')[0]",
+		"expected first word", result[0], "alpha");
+	LT_EXPECT_STRING("ft_split(\",,alpha,beta,,gamma,\", ',')[1]",
+		"expected second word", result[1], "beta");
+	LT_EXPECT_STRING("ft_split(\",,alpha,beta,,gamma,\", ',')[2]",
+		"expected third word", result[2], "gamma");
+	LT_EXPECT_PTR("ft_split(\",,alpha,beta,,gamma,\", ',')[3]",
+		"array must be NULL terminated after 3 words",
+		result[3], NULL, NULL, 0);
 	free_split(result);
 	result = ft_split(";;;;", ';');
-	LT_CHECK(result != NULL && result[0] == NULL,
-		"ft_split delimiters-only mismatch");
+	LT_CHECK(result != NULL,
+		"call: ft_split(\";;;;\", ';')\n"
+		"expected: non-NULL array [NULL]\nactual pointer: <NULL>");
+	LT_EXPECT_PTR("ft_split(\";;;;\", ';')[0]",
+		"delimiters-only string must produce an empty array",
+		result[0], NULL, NULL, 0);
 	free_split(result);
 	result = ft_split("", ',');
-	LT_CHECK(result != NULL && result[0] == NULL,
-		"ft_split empty string mismatch");
+	LT_CHECK(result != NULL,
+		"call: ft_split(\"\", ',')\n"
+		"expected: non-NULL array [NULL]\nactual pointer: <NULL>");
+	LT_EXPECT_PTR("ft_split(\"\", ',')[0]",
+		"empty string must produce an empty array", result[0], NULL, NULL, 0);
 	free_split(result);
 	result = ft_split("abc", '\0');
-	LT_CHECK(result != NULL && result[0] && strcmp(result[0], "abc") == 0
-		&& result[1] == NULL, "ft_split NUL delimiter mismatch");
+	LT_CHECK(result != NULL,
+		"call: ft_split(\"abc\", '\\0')\n"
+		"expected: non-NULL array [\"abc\", NULL]\nactual pointer: <NULL>");
+	LT_EXPECT_STRING("ft_split(\"abc\", '\\0')[0]",
+		"NUL delimiter should keep the whole string as one word",
+		result[0], "abc");
+	LT_EXPECT_PTR("ft_split(\"abc\", '\\0')[1]",
+		"array must be NULL terminated after 1 word", result[1], NULL, NULL, 0);
 	free_split(result);
 	return (LT_PASS);
 }
@@ -1027,6 +1398,7 @@ static t_lt_result	test_itoa_cases(char *message, size_t size)
 		{INT_MAX, "2147483647"}, {INT_MIN, "-2147483648"}
 	};
 	char			*result;
+	char			context[64];
 	size_t			index;
 
 	LT_REQUIRE(ft_itoa);
@@ -1034,11 +1406,9 @@ static t_lt_result	test_itoa_cases(char *message, size_t size)
 	while (index < sizeof(cases) / sizeof(cases[0]))
 	{
 		result = ft_itoa(cases[index].input);
-		LT_CHECK(result != NULL, "ft_itoa returned NULL for %d",
-			cases[index].input);
-		LT_CHECK(strcmp(result, cases[index].expected) == 0,
-			"ft_itoa(%d) returned '%s', expected '%s'",
-			cases[index].input, result, cases[index].expected);
+		snprintf(context, sizeof(context), "n=%d", cases[index].input);
+		LT_EXPECT_STRING("ft_itoa(input)", context, result,
+			cases[index].expected);
 		free(result);
 		index++;
 	}
@@ -1056,13 +1426,12 @@ static t_lt_result	test_strmapi_cases(char *message, size_t size)
 
 	LT_REQUIRE(ft_strmapi);
 	result = ft_strmapi("aaaaaa", mapi_shift);
-	LT_CHECK(result != NULL, "ft_strmapi returned NULL");
-	LT_CHECK(strcmp(result, "abcabc") == 0,
-		"ft_strmapi transformed string mismatch: '%s'", result);
+	LT_EXPECT_STRING("ft_strmapi(\"aaaaaa\", mapi_shift)",
+		"mapi_shift adds index % 3 to each char", result, "abcabc");
 	free(result);
 	result = ft_strmapi("", mapi_shift);
-	LT_CHECK(result != NULL && strcmp(result, "") == 0,
-		"ft_strmapi empty string mismatch");
+	LT_EXPECT_STRING("ft_strmapi(\"\", mapi_shift)",
+		"empty string input", result, "");
 	free(result);
 	return (LT_PASS);
 }
@@ -1079,8 +1448,9 @@ static t_lt_result	test_striteri_cases(char *message, size_t size)
 	LT_REQUIRE(ft_striteri);
 	strcpy(buffer, "aaaaaa");
 	ft_striteri(buffer, iteri_shift);
-	LT_CHECK(strcmp(buffer, "ababab") == 0,
-		"ft_striteri transformed string mismatch: '%s'", buffer);
+	LT_EXPECT_STRING("ft_striteri(buffer, iteri_shift)",
+		"buffer starts as \"aaaaaa\"; iteri_shift adds index % 2",
+		buffer, "ababab");
 	return (LT_PASS);
 }
 
@@ -1115,8 +1485,8 @@ static t_lt_result	test_putchar_fd_cases(char *message, size_t size)
 	close(fds[1]);
 	read_pipe_output(fds[0], buffer, sizeof(buffer));
 	close(fds[0]);
-	LT_CHECK(strcmp(buffer, "A\n") == 0,
-		"ft_putchar_fd output mismatch: '%s'", buffer);
+	LT_EXPECT_STRING("ft_putchar_fd('A', fd); ft_putchar_fd('\\n', fd)",
+		"pipe output", buffer, "A\n");
 	ft_putchar_fd('x', -1);
 	return (LT_PASS);
 }
@@ -1133,8 +1503,8 @@ static t_lt_result	test_putstr_fd_cases(char *message, size_t size)
 	close(fds[1]);
 	read_pipe_output(fds[0], buffer, sizeof(buffer));
 	close(fds[0]);
-	LT_CHECK(strcmp(buffer, "hello") == 0,
-		"ft_putstr_fd output mismatch: '%s'", buffer);
+	LT_EXPECT_STRING("ft_putstr_fd(\"hello\", fd); ft_putstr_fd(\"\", fd)",
+		"pipe output", buffer, "hello");
 	ft_putstr_fd("ignored", -1);
 	return (LT_PASS);
 }
@@ -1151,8 +1521,8 @@ static t_lt_result	test_putendl_fd_cases(char *message, size_t size)
 	close(fds[1]);
 	read_pipe_output(fds[0], buffer, sizeof(buffer));
 	close(fds[0]);
-	LT_CHECK(strcmp(buffer, "hello\n\n") == 0,
-		"ft_putendl_fd output mismatch: '%s'", buffer);
+	LT_EXPECT_STRING("ft_putendl_fd(\"hello\", fd); ft_putendl_fd(\"\", fd)",
+		"pipe output", buffer, "hello\n\n");
 	ft_putendl_fd("ignored", -1);
 	return (LT_PASS);
 }
@@ -1170,8 +1540,8 @@ static t_lt_result	test_putnbr_fd_cases(char *message, size_t size)
 	close(fds[1]);
 	read_pipe_output(fds[0], buffer, sizeof(buffer));
 	close(fds[0]);
-	LT_CHECK(strcmp(buffer, "0-42-2147483648") == 0,
-		"ft_putnbr_fd output mismatch: '%s'", buffer);
+	LT_EXPECT_STRING("ft_putnbr_fd(0); ft_putnbr_fd(-42); ft_putnbr_fd(INT_MIN)",
+		"pipe output", buffer, "0-42-2147483648");
 	ft_putnbr_fd(123, -1);
 	return (LT_PASS);
 }
@@ -1209,13 +1579,21 @@ static t_lt_result	test_lstnew_cases(char *message, size_t size)
 	LT_REQUIRE(ft_lstnew);
 	value = 42;
 	node = ft_lstnew(&value);
-	LT_CHECK(node != NULL, "ft_lstnew returned NULL");
-	LT_CHECK(node->content == &value, "ft_lstnew content mismatch");
-	LT_CHECK(node->next == NULL, "ft_lstnew next is not NULL");
+	LT_CHECK(node != NULL,
+		"call: ft_lstnew(&value)\nexpected: non-NULL node\nactual pointer: <NULL>");
+	LT_EXPECT_PTR("node->content after ft_lstnew(&value)",
+		"value=42; content must point to the original value",
+		node->content, &value, NULL, 0);
+	LT_EXPECT_PTR("node->next after ft_lstnew(&value)",
+		"new node next must be NULL", node->next, NULL, NULL, 0);
 	free(node);
 	node = ft_lstnew(NULL);
-	LT_CHECK(node != NULL && node->content == NULL && node->next == NULL,
-		"ft_lstnew NULL content mismatch");
+	LT_CHECK(node != NULL,
+		"call: ft_lstnew(NULL)\nexpected: non-NULL node\nactual pointer: <NULL>");
+	LT_EXPECT_PTR("node->content after ft_lstnew(NULL)",
+		"content must stay NULL", node->content, NULL, NULL, 0);
+	LT_EXPECT_PTR("node->next after ft_lstnew(NULL)",
+		"new node next must be NULL", node->next, NULL, NULL, 0);
 	free(node);
 	return (LT_PASS);
 }
@@ -1233,13 +1611,19 @@ static t_lt_result	test_lstadd_front_cases(char *message, size_t size)
 	b.next = NULL;
 	head = &a;
 	ft_lstadd_front(&head, &b);
-	LT_CHECK(head == &b && b.next == &a && a.next == NULL,
-		"ft_lstadd_front did not link new head correctly");
+	LT_EXPECT_PTR("head after ft_lstadd_front(&head, &b)",
+		"initial list: a -> NULL; new node: b", head, &b, NULL, 0);
+	LT_EXPECT_PTR("b.next after ft_lstadd_front(&head, &b)",
+		"b must point to previous head a", b.next, &a, NULL, 0);
+	LT_EXPECT_PTR("a.next after ft_lstadd_front(&head, &b)",
+		"a must remain final node", a.next, NULL, NULL, 0);
 	head = NULL;
 	b.next = NULL;
 	ft_lstadd_front(&head, &b);
-	LT_CHECK(head == &b && b.next == NULL,
-		"ft_lstadd_front empty list mismatch");
+	LT_EXPECT_PTR("head after ft_lstadd_front(&empty, &b)",
+		"initial list: NULL; new node: b", head, &b, NULL, 0);
+	LT_EXPECT_PTR("b.next after ft_lstadd_front(&empty, &b)",
+		"single-node list must end at NULL", b.next, NULL, NULL, 0);
 	return (LT_PASS);
 }
 
@@ -1251,8 +1635,9 @@ static t_lt_result	test_lstsize_cases(char *message, size_t size)
 	nodes[0].next = &nodes[1];
 	nodes[1].next = &nodes[2];
 	nodes[2].next = NULL;
-	LT_CHECK(ft_lstsize(NULL) == 0, "ft_lstsize(NULL) must be 0");
-	LT_CHECK(ft_lstsize(nodes) == 3, "ft_lstsize three-node mismatch");
+	LT_EXPECT_INT("ft_lstsize(NULL)", "lst=NULL", ft_lstsize(NULL), 0);
+	LT_EXPECT_INT("ft_lstsize(nodes)",
+		"nodes[0] -> nodes[1] -> nodes[2] -> NULL", ft_lstsize(nodes), 3);
 	return (LT_PASS);
 }
 
@@ -1264,8 +1649,11 @@ static t_lt_result	test_lstlast_cases(char *message, size_t size)
 	nodes[0].next = &nodes[1];
 	nodes[1].next = &nodes[2];
 	nodes[2].next = NULL;
-	LT_CHECK(ft_lstlast(NULL) == NULL, "ft_lstlast(NULL) must be NULL");
-	LT_CHECK(ft_lstlast(nodes) == &nodes[2], "ft_lstlast mismatch");
+	LT_EXPECT_PTR("ft_lstlast(NULL)", "lst=NULL",
+		ft_lstlast(NULL), NULL, NULL, 0);
+	LT_EXPECT_PTR("ft_lstlast(nodes)",
+		"nodes[0] -> nodes[1] -> nodes[2] -> NULL",
+		ft_lstlast(nodes), &nodes[2], nodes, sizeof(nodes));
 	return (LT_PASS);
 }
 
@@ -1280,13 +1668,19 @@ static t_lt_result	test_lstadd_back_cases(char *message, size_t size)
 	b.next = NULL;
 	head = &a;
 	ft_lstadd_back(&head, &b);
-	LT_CHECK(head == &a && a.next == &b && b.next == NULL,
-		"ft_lstadd_back did not append correctly");
+	LT_EXPECT_PTR("head after ft_lstadd_back(&head, &b)",
+		"initial list: a -> NULL; appended node: b", head, &a, NULL, 0);
+	LT_EXPECT_PTR("a.next after ft_lstadd_back(&head, &b)",
+		"a must point to appended node b", a.next, &b, NULL, 0);
+	LT_EXPECT_PTR("b.next after ft_lstadd_back(&head, &b)",
+		"b must be final node", b.next, NULL, NULL, 0);
 	head = NULL;
 	a.next = NULL;
 	ft_lstadd_back(&head, &a);
-	LT_CHECK(head == &a && a.next == NULL,
-		"ft_lstadd_back empty list mismatch");
+	LT_EXPECT_PTR("head after ft_lstadd_back(&empty, &a)",
+		"initial list: NULL; appended node: a", head, &a, NULL, 0);
+	LT_EXPECT_PTR("a.next after ft_lstadd_back(&empty, &a)",
+		"single-node list must end at NULL", a.next, NULL, NULL, 0);
 	return (LT_PASS);
 }
 
@@ -1304,8 +1698,9 @@ static t_lt_result	test_lstdelone_cases(char *message, size_t size)
 	node->next = (t_list *)0x1234;
 	g_delete_count = 0;
 	ft_lstdelone(node, del_count_free);
-	LT_CHECK(g_delete_count == 1,
-		"ft_lstdelone did not call del exactly once");
+	LT_EXPECT_INT("ft_lstdelone(node, del_count_free)",
+		"node has allocated content; del callback increments counter",
+		g_delete_count, 1);
 	return (LT_PASS);
 }
 
@@ -1331,9 +1726,11 @@ static t_lt_result	test_lstclear_cases(char *message, size_t size)
 	third->next = NULL;
 	g_delete_count = 0;
 	ft_lstclear(&head, del_count_free);
-	LT_CHECK(head == NULL, "ft_lstclear did not set list pointer to NULL");
-	LT_CHECK(g_delete_count == 3,
-		"ft_lstclear called del %d times, expected 3", g_delete_count);
+	LT_EXPECT_PTR("head after ft_lstclear(&head, del_count_free)",
+		"three-node list must be cleared and head set to NULL",
+		head, NULL, NULL, 0);
+	LT_EXPECT_INT("del callback count after ft_lstclear",
+		"three nodes with allocated content", g_delete_count, 3);
 	return (LT_PASS);
 }
 
@@ -1351,7 +1748,8 @@ static t_lt_result	test_lstiter_cases(char *message, size_t size)
 	nodes[2].next = NULL;
 	g_iter_sum = 0;
 	ft_lstiter(nodes, iter_add_int);
-	LT_CHECK(g_iter_sum == 6, "ft_lstiter sum mismatch: %d", g_iter_sum);
+	LT_EXPECT_INT("ft_lstiter(nodes, iter_add_int)",
+		"node contents are 1, 2, 3; callback sums them", g_iter_sum, 6);
 	return (LT_PASS);
 }
 
@@ -1383,15 +1781,29 @@ static t_lt_result	test_lstmap_cases(char *message, size_t size)
 	nodes[1].next = &nodes[2];
 	nodes[2].next = NULL;
 	mapped = ft_lstmap(nodes, map_double_int, del_count_free);
-	LT_CHECK(mapped != NULL, "ft_lstmap returned NULL");
+	LT_CHECK(mapped != NULL,
+		"call: ft_lstmap(nodes, map_double_int, del_count_free)\n"
+		"input values: [1, 2, 3]\nexpected: non-NULL mapped list [2, 4, 6]\n"
+		"actual pointer: <NULL>");
 	expected = 2;
-	LT_CHECK(*(int *)mapped->content == expected, "ft_lstmap first value mismatch");
-	LT_CHECK(mapped->next && *(int *)mapped->next->content == 4,
-		"ft_lstmap second value mismatch");
-	LT_CHECK(mapped->next->next && *(int *)mapped->next->next->content == 6,
-		"ft_lstmap third value mismatch");
-	LT_CHECK(mapped->next->next->next == NULL,
-		"ft_lstmap result is not NULL terminated");
+	LT_EXPECT_INT("mapped[0]->content after ft_lstmap",
+		"input value 1 mapped by value * 2",
+		*(int *)mapped->content, expected);
+	LT_CHECK(mapped->next != NULL,
+		"call: ft_lstmap(nodes, map_double_int, del_count_free)\n"
+		"expected: second mapped node with value 4\nactual pointer: <NULL>");
+	LT_EXPECT_INT("mapped[1]->content after ft_lstmap",
+		"input value 2 mapped by value * 2",
+		*(int *)mapped->next->content, 4);
+	LT_CHECK(mapped->next->next != NULL,
+		"call: ft_lstmap(nodes, map_double_int, del_count_free)\n"
+		"expected: third mapped node with value 6\nactual pointer: <NULL>");
+	LT_EXPECT_INT("mapped[2]->content after ft_lstmap",
+		"input value 3 mapped by value * 2",
+		*(int *)mapped->next->next->content, 6);
+	LT_EXPECT_PTR("mapped[2]->next after ft_lstmap",
+		"mapped list must be NULL terminated",
+		mapped->next->next->next, NULL, NULL, 0);
 	free_mapped_list(mapped);
 	return (LT_PASS);
 }
@@ -1407,9 +1819,11 @@ static t_lt_result	test_allocfail_calloc(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_calloc(8, 8);
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_calloc did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_calloc(8, 8) with malloc/calloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_calloc",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1424,9 +1838,11 @@ static t_lt_result	test_allocfail_strdup(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_strdup("abc");
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_strdup did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_strdup(\"abc\") with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_strdup",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1441,9 +1857,11 @@ static t_lt_result	test_allocfail_substr(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_substr("abcdef", 1, 3);
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_substr did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_substr(\"abcdef\", 1, 3) with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_substr",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1458,9 +1876,11 @@ static t_lt_result	test_allocfail_strjoin(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_strjoin("abc", "def");
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_strjoin did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_strjoin(\"abc\", \"def\") with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_strjoin",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1475,9 +1895,11 @@ static t_lt_result	test_allocfail_strtrim(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_strtrim("  abc  ", " ");
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_strtrim did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_strtrim(\"  abc  \", \" \") with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_strtrim",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1492,9 +1914,12 @@ static t_lt_result	test_allocfail_split(char *message, size_t size)
 	lt_alloc_begin(2);
 	ptr = ft_split("aa,bb,cc", ',');
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_split did not return NULL after inner allocation failure");
-	LT_CHECK(outstanding == 0,
-		"ft_split leaked %zu tracked allocations after failure", outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_split(\"aa,bb,cc\", ',') with failure after 2 allocations\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_split",
+		"partial allocations must be freed after inner allocation failure",
+		outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1509,9 +1934,11 @@ static t_lt_result	test_allocfail_itoa(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_itoa(INT_MIN);
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_itoa did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_itoa(INT_MIN) with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_itoa",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1526,9 +1953,11 @@ static t_lt_result	test_allocfail_strmapi(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_strmapi("abc", mapi_shift);
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_strmapi did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_strmapi(\"abc\", mapi_shift) with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_strmapi",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1543,9 +1972,11 @@ static t_lt_result	test_allocfail_lstnew(char *message, size_t size)
 	lt_alloc_begin(0);
 	ptr = ft_lstnew((void *)42);
 	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL, "ft_lstnew did not return NULL when allocation failed");
-	LT_CHECK(outstanding == 0, "allocation tracker found %zu leaked pointers",
-		outstanding);
+	LT_CHECK(ptr == NULL,
+		"call: ft_lstnew((void *)42) with malloc failure injected immediately\n"
+		"expected pointer: <NULL>\nactual pointer: %p", ptr);
+	LT_EXPECT_SIZE("allocation tracker after failed ft_lstnew",
+		"all allocations are forced to fail", outstanding, 0);
 	return (LT_PASS);
 }
 
@@ -1573,7 +2004,9 @@ static t_lt_result	test_probe_substr_null(char *message, size_t size)
 
 	LT_REQUIRE(ft_substr);
 	ptr = ft_substr(NULL, 0, 1);
-	LT_CHECK(ptr == NULL, "ft_substr(NULL, ...) returned a non-NULL pointer");
+	LT_CHECK(ptr == NULL,
+		"call: ft_substr(NULL, 0, 1)\nexpected pointer: <NULL>\nactual pointer: %p",
+		ptr);
 	return (LT_PASS);
 }
 
@@ -1583,7 +2016,9 @@ static t_lt_result	test_probe_strjoin_null(char *message, size_t size)
 
 	LT_REQUIRE(ft_strjoin);
 	ptr = ft_strjoin(NULL, "x");
-	LT_CHECK(ptr == NULL, "ft_strjoin(NULL, ...) returned a non-NULL pointer");
+	LT_CHECK(ptr == NULL,
+		"call: ft_strjoin(NULL, \"x\")\nexpected pointer: <NULL>\nactual pointer: %p",
+		ptr);
 	return (LT_PASS);
 }
 
@@ -1593,7 +2028,9 @@ static t_lt_result	test_probe_split_null(char *message, size_t size)
 
 	LT_REQUIRE(ft_split);
 	ptr = ft_split(NULL, ',');
-	LT_CHECK(ptr == NULL, "ft_split(NULL, ...) returned a non-NULL pointer");
+	LT_CHECK(ptr == NULL,
+		"call: ft_split(NULL, ',')\nexpected pointer: <NULL>\nactual pointer: %p",
+		ptr);
 	return (LT_PASS);
 }
 

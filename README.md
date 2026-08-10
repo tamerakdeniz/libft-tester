@@ -219,6 +219,18 @@ Warnings   0
 Skipped    0
 ```
 
+When a test fails, the tester prints the call, the input, the expected result,
+and the actual result. Byte-buffer checks also show the first differing byte:
+
+```text
+[001/001] FAIL    ft_memcpy.cases                       6 ms  binary copy and len 0
+  call: ft_memcpy(dst + 1, src, 7)
+  input: copy 7 bytes from src into dst+1; dst initially all 0xcc
+  expected bytes: [cc 61 62 00 64 65 66 67 cc cc]
+  actual bytes: [cc 61 62 00 64 65 66 cc cc cc]
+  first diff: index 7 expected 0x67 actual 0xcc
+```
+
 ## What it does
 
 - Copies the submitted Libft project into a temporary directory before building.
