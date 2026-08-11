@@ -30,6 +30,10 @@ Makefile, compiles the available `.c` files directly into a temporary
 no header yet. With `--only`, it compiles only the matching function source file
 so a single function can be tested before the whole project builds.
 
+If a matched source file defines `main`, `--source-build --only` stops with an
+explicit setup error. Move that local test `main` into `main.c`/`test.c` or guard
+it with `#ifdef` before testing the function source as part of `libft.a`.
+
 ## Memory Checks
 
 Recommended commands:
@@ -237,6 +241,9 @@ and the actual result. Byte-buffer checks also show the first differing byte:
 - Runs `make all` in the copy, so the original project directory is not modified.
 - With `--source-build`, skips `make` and builds `libft.a` directly from
   available `.c` files, with a temporary compatibility `libft.h` if needed.
+- In `--source-build --only`, reports an explicit setup error when the matched
+  function source file contains `main`, instead of later reporting a missing
+  symbol from an empty archive.
 - Finds and links the produced `libft.a`.
 - Runs each test as a separate process with a timeout.
 - Uses protected-page boundary cases for bounded string functions, catching

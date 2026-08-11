@@ -437,7 +437,18 @@ def build_sources_direct(project_dir: Path, verbose: bool, only=None, asan=False
                 + compile_result.stdout
             )
         if object_defines_main(object_file):
-            skipped_main.append(source.relative_to(project_dir).as_posix())
+            relative = source.relative_to(project_dir).as_posix()
+            if selected_functions:
+                selected = ", ".join(sorted(selected_functions))
+                raise TesterError(
+                    f"--source-build --only matched {relative}, but that file "
+                    "defines main.\n"
+                    f"Selected function(s): {selected}\n"
+                    "libft source files must not contain a test main when they "
+                    "are compiled into libft.a. Move the main into main.c/test.c "
+                    "or guard it with #ifdef before running this test."
+                )
+            skipped_main.append(relative)
             continue
         objects.append(object_file)
     if selected_functions and not sources:
@@ -1016,6 +1027,7 @@ def main():
             print(color.green("All required tests passed."))
 
     except TesterError as exc:
+        sys.stdout.flush()
         print(color.red(str(exc)), file=sys.stderr)
         exit_code = 2
     finally:
