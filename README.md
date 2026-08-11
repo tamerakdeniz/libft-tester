@@ -19,6 +19,8 @@ make
 ./libft-tester ../libft --verbose
 ./libft-tester ../libft --only ft_memmove
 ./libft-tester ../libft --only ft_memmove --evaluation
+./libft-tester ../libft --e ft_memmove
+./libft-tester ../libft ft_memmove
 ./libft-tester ../libft --source-build
 ./libft-tester ../libft --source-build --only ft_memmove
 ./libft-tester ../libft --json report.json
@@ -34,6 +36,20 @@ so a single function can be tested before the whole project builds.
 If a matched source file defines `main`, `--source-build --only` stops with an
 explicit setup error. Move that local test `main` into `main.c`/`test.c` or guard
 it with `#ifdef` before testing the function source as part of `libft.a`.
+
+For quick single-function work, you can pass a function or test id directly:
+
+```sh
+libft-tester . ft_memset
+libft-tester . --e ft_memset
+libft-tester --e ft_memset
+```
+
+`--e` is a short alias for `--evaluation`. A direct `ft_*` target automatically
+uses a direct source build with temporary compatibility headers, so it can report
+the function result even when the submitted Makefile/header setup is incomplete.
+It also runs a non-fatal project build check first and prints any Makefile,
+header, or missing-symbol issue separately.
 
 ## Memory Checks
 
@@ -251,6 +267,9 @@ without writing a temporary `main`.
 - In `--source-build --only`, reports an explicit setup error when the matched
   function source file contains `main`, instead of later reporting a missing
   symbol from an empty archive.
+- Accepts direct function/test-id shortcuts such as `libft-tester . --e
+  ft_strlen`; direct targets run a non-fatal project build check, then test the
+  selected code through direct source build.
 - Finds and links the produced `libft.a`.
 - Runs each test as a separate process with a timeout.
 - Uses protected-page boundary cases for bounded string functions, catching

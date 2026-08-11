@@ -341,9 +341,9 @@ def source_matches_selected(source: Path, selected_functions):
     )
 
 
-def ensure_compat_header(project_dir: Path):
+def ensure_compat_header(project_dir: Path, force=False):
     root_header = project_dir / "libft.h"
-    if root_header.exists():
+    if root_header.exists() and not force:
         return []
     written = []
     candidates = [
@@ -352,11 +352,16 @@ def ensure_compat_header(project_dir: Path):
         project_dir / "includes" / "libft.h",
     ]
     for header in candidates:
-        if header.exists():
+        if header.exists() and not force:
             continue
         header.parent.mkdir(parents=True, exist_ok=True)
         header.write_text(COMPAT_LIBFT_HEADER, encoding="utf-8")
         written.append(header.relative_to(project_dir).as_posix())
+    if force:
+        return [
+            "Using temporary compatibility header(s) for direct source build: "
+            + ", ".join(written)
+        ]
     return [
         "Created temporary compatibility header(s): " + ", ".join(written)
     ]
@@ -410,13 +415,14 @@ def add_empty_archive_member(project_dir: Path, objects_dir: Path, objects, asan
     objects.append(object_file)
 
 
-def build_sources_direct(project_dir: Path, verbose: bool, only=None, asan=False):
+def build_sources_direct(project_dir: Path, verbose: bool, only=None, asan=False,
+                         force_compat_header=False):
     selected_functions = only_function_names(only or set())
     sources = [
         source for source in direct_source_candidates(project_dir)
         if source_matches_selected(source, selected_functions)
     ]
-    warnings = ensure_compat_header(project_dir)
+    warnings = ensure_compat_header(project_dir, force=force_compat_header)
     objects_dir = project_dir / ".libft-tester-objects"
     objects_dir.mkdir(parents=True, exist_ok=True)
     objects = []
@@ -475,9 +481,16 @@ def build_sources_direct(project_dir: Path, verbose: bool, only=None, asan=False
 
 
 def build_target(project_dir: Path, include_bonus: bool, verbose: bool,
-                 make_vars=None, source_build=False, only=None, asan=False):
+                 make_vars=None, source_build=False, only=None, asan=False,
+                 force_compat_header=False):
     if source_build:
-        return build_sources_direct(project_dir, verbose, only=only, asan=asan)
+        return build_sources_direct(
+            project_dir,
+            verbose,
+            only=only,
+            asan=asan,
+            force_compat_header=force_compat_header,
+        )
     make_vars = make_vars or []
     makefile = project_dir / "Makefile"
     if not makefile.exists():
@@ -499,6 +512,60 @@ def build_target(project_dir: Path, include_bonus: bool, verbose: bool,
         if bonus.returncode != 0:
             raise TesterError("make bonus failed:\n" + bonus.stdout)
     return []
+
+
+def run_project_build_check(color: Color, project: Path, tmp_root: Path,
+                            groups, only, args):
+    warnings = []
+    check_project = tmp_root / "project_build_check"
+    print_section(color, "Project Build Check")
+    print(
+        "Checking the submitted Makefile/header build. "
+        "Failures here do not stop the direct source test."
+    )
+    copy_project(project, check_project)
+    try:
+        build_warnings = build_target(
+            check_project,
+            "bonus" in groups,
+            args.verbose,
+            source_build=False,
+        )
+        for warning in build_warnings:
+            warnings.append(warning)
+            print(color.yellow("Warning: ") + warning)
+        libft, warning = find_libft(check_project)
+        if warning:
+            warnings.append(warning)
+            print(color.yellow("Warning: ") + warning)
+        symbols = exported_symbols(libft)
+        selected_functions = only_function_names(only)
+        missing = sorted(
+            function for function in selected_functions
+            if function not in symbols
+        )
+        if missing:
+            warning = (
+                "Project libft.a is missing selected symbol(s): "
+                + ", ".join(missing)
+            )
+            warnings.append(warning)
+            print(color.yellow("Warning: ") + warning)
+        else:
+            print(color.green("Project build check passed."))
+    except TesterError as exc:
+        warning = (
+            "Project build check failed; continuing with direct source test."
+        )
+        warnings.append(warning)
+        print(color.yellow("Warning: ") + warning)
+        lines = str(exc).splitlines()
+        max_lines = 20 if args.verbose else 8
+        for line in lines[:max_lines]:
+            print("  " + line)
+        if len(lines) > max_lines:
+            print(f"  ... output truncated to first {max_lines} lines")
+    return warnings
 
 
 def find_libft(project_dir: Path):
@@ -795,6 +862,8 @@ def main():
     )
     parser.add_argument("project", nargs="?",
                         help="Path to the Libft project to test")
+    parser.add_argument("targets", nargs="*",
+                        help="Function or test id shortcut, e.g. ft_memset")
     parser.add_argument("--update", action="store_true",
                         help="Update this tester checkout with git pull --ff-only.")
     parser.add_argument("--no-update-check", action="store_true",
@@ -813,7 +882,7 @@ def main():
                         help="Run Valgrind. On macOS without Valgrind, falls back to ASan.")
     parser.add_argument("--verbose", action="store_true",
                         help="Print build logs and passing test output.")
-    parser.add_argument("--evaluation", action="store_true",
+    parser.add_argument("--evaluation", "--e", action="store_true",
                         help=(
                             "Print each exercised case with its call, input, "
                             "expected output, and actual output."
@@ -839,6 +908,13 @@ def main():
     color = Color(sys.stdout.isatty() and not args.no_color)
     if args.update:
         return run_self_update(color)
+    if (
+        args.project is not None
+        and args.project.startswith("ft_")
+        and not Path(args.project).expanduser().exists()
+    ):
+        args.targets.insert(0, args.project)
+        args.project = "."
     if args.project is None:
         parser.error("the following arguments are required: project")
     if (
@@ -853,7 +929,13 @@ def main():
         return 2
 
     groups = choose_groups(args)
+    direct_targets = parse_only(args.targets)
     only = parse_only(args.only)
+    if direct_targets:
+        only.update(direct_targets)
+    direct_target_mode = bool(direct_targets)
+    shortcut_mode = bool(direct_target_mode and not args.source_build)
+    source_build_mode = args.source_build or direct_target_mode
     mode = memory_mode(args)
     if groups == {"bonus"} and not BONUS_FUNCTIONS:
         print(color.yellow("No bonus tests are configured for Libft subject v19.3."))
@@ -874,19 +956,30 @@ def main():
 
     try:
         print_run_header(color, project, groups, only, args, mode)
+        if shortcut_mode:
+            warnings.extend(
+                run_project_build_check(color, project, tmp_root, groups, only, args)
+            )
         copied_project = tmp_root / "project"
         copy_project(project, copied_project)
-        print_section(color, "Build")
-        if args.source_build:
-            print("Compiling available source files directly into libft.a.")
+        print_section(color, "Direct Source Build" if direct_target_mode else "Build")
+        if source_build_mode:
+            if direct_target_mode:
+                print(
+                    "Compiling selected source files directly with temporary "
+                    "compatibility headers."
+                )
+            else:
+                print("Compiling available source files directly into libft.a.")
         else:
             print("Compiling a temporary copy of the submitted project.")
         build_warnings = build_target(
             copied_project,
             "bonus" in groups,
             args.verbose,
-            source_build=args.source_build,
+            source_build=source_build_mode,
             only=only,
+            force_compat_header=direct_target_mode,
         )
         for warning in build_warnings:
             warnings.append(warning)
@@ -949,7 +1042,7 @@ def main():
                         "-fsanitize=address,undefined -fno-omit-frame-pointer"
                     )
                     print_section(color, "ASan Build")
-                    if args.source_build:
+                    if source_build_mode:
                         print("Compiling available source files directly with sanitizer flags.")
                         build_warnings = build_target(
                             asan_project,
@@ -958,6 +1051,7 @@ def main():
                             source_build=True,
                             only=only,
                             asan=True,
+                            force_compat_header=direct_target_mode,
                         )
                     else:
                         print("Compiling a second temporary copy with sanitizer flags.")
@@ -1028,7 +1122,7 @@ def main():
         print_section(color, "Summary")
         print(f"{'Passed':<10} {len(passed)}")
         print(f"{'Failed':<10} {len(failed)}")
-        print(f"{'Warnings':<10} {len(warned)}")
+        print(f"{'Warnings':<10} {len(warned) + len(warnings)}")
         print(f"{'Skipped':<10} {len(skipped)}")
         if failed:
             exit_code = 1
@@ -1041,6 +1135,8 @@ def main():
                 print(f"  ... and {len(failed) - 20} more")
         elif warned:
             print(color.yellow("Required tests passed. Probe warnings do not affect exit code."))
+        elif warnings:
+            print(color.yellow("Required tests passed with setup warnings."))
         else:
             print(color.green("All required tests passed."))
 
@@ -1059,7 +1155,10 @@ def main():
             "summary": {
                 "total": len(results),
                 "failed": len([r for r in results if strict_failure(r)]),
-                "warnings": len([r for r in results if r.status == "warn"]),
+                "warnings": (
+                    len([r for r in results if r.status == "warn"])
+                    + len(warnings)
+                ),
             },
         }
         if args.json_path:
