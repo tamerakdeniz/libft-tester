@@ -117,9 +117,54 @@ static int	lt_has_symbol(const char *name)
 	return (0);
 }
 
+static int	lt_evaluation_enabled(void)
+{
+	static int	cached = -1;
+	const char	*value;
+
+	if (cached >= 0)
+		return (cached);
+	value = getenv("LT_EVALUATION");
+	cached = (value && value[0] && strcmp(value, "0") != 0);
+	return (cached);
+}
+
+static void	lt_eval_emit(const char *call, const char *input,
+	const char *expected_label, const char *expected,
+	const char *actual_label, const char *actual, int passed)
+{
+	if (!lt_evaluation_enabled())
+		return ;
+	printf("[evaluation] %s\n", passed ? "PASS" : "FAIL");
+	printf("  call: %s\n", call ? call : "");
+	if (input && input[0])
+		printf("  input: %s\n", input);
+	printf("  %s: %s\n", expected_label, expected);
+	printf("  %s: %s\n", actual_label, actual);
+	fflush(stdout);
+}
+
+static void	lt_eval_check(int passed, const char *format, ...)
+{
+	va_list	args;
+	char	detail[1024];
+
+	if (!lt_evaluation_enabled())
+		return ;
+	va_start(args, format);
+	vsnprintf(detail, sizeof(detail), format, args);
+	va_end(args);
+	printf("[evaluation] %s\n", passed ? "PASS" : "FAIL");
+	printf("  check: %s\n", detail);
+	fflush(stdout);
+}
+
 #define LT_CHECK(expr, msg, ...) \
 	do { \
-		if (!(expr)) { \
+		int lt_check_passed = (expr); \
+		if (!lt_check_passed) { \
+			if (lt_evaluation_enabled()) \
+				lt_eval_check(0, msg, ##__VA_ARGS__); \
 			snprintf(message, size, msg, ##__VA_ARGS__); \
 			return (LT_FAIL); \
 		} \
@@ -607,7 +652,16 @@ static void	lt_format_ptr(char *dst, size_t size, const void *ptr,
 static int	lt_check_size(char *message, size_t size, const char *call,
 	const char *input, size_t actual, size_t expected)
 {
-	if (actual == expected)
+	char	actual_fmt[64];
+	char	expected_fmt[64];
+	int		passed;
+
+	passed = (actual == expected);
+	snprintf(actual_fmt, sizeof(actual_fmt), "%zu", actual);
+	snprintf(expected_fmt, sizeof(expected_fmt), "%zu", expected);
+	lt_eval_emit(call, input, "expected return", expected_fmt,
+		"actual return", actual_fmt, passed);
+	if (passed)
 		return (1);
 	snprintf(message, size,
 		"call: %s\ninput: %s\nexpected return: %zu\nactual return: %zu",
@@ -618,7 +672,16 @@ static int	lt_check_size(char *message, size_t size, const char *call,
 static int	lt_check_int(char *message, size_t size, const char *call,
 	const char *input, long long actual, long long expected)
 {
-	if (actual == expected)
+	char	actual_fmt[64];
+	char	expected_fmt[64];
+	int		passed;
+
+	passed = (actual == expected);
+	snprintf(actual_fmt, sizeof(actual_fmt), "%lld", actual);
+	snprintf(expected_fmt, sizeof(expected_fmt), "%lld", expected);
+	lt_eval_emit(call, input, "expected return", expected_fmt,
+		"actual return", actual_fmt, passed);
+	if (passed)
 		return (1);
 	snprintf(message, size,
 		"call: %s\ninput: %s\nexpected return: %lld\nactual return: %lld",
@@ -629,7 +692,16 @@ static int	lt_check_int(char *message, size_t size, const char *call,
 static int	lt_check_sign(char *message, size_t size, const char *call,
 	const char *input, int actual, int expected)
 {
-	if (same_sign(actual, expected))
+	char	actual_fmt[64];
+	char	expected_fmt[64];
+	int		passed;
+
+	passed = same_sign(actual, expected);
+	snprintf(actual_fmt, sizeof(actual_fmt), "%d", actual);
+	snprintf(expected_fmt, sizeof(expected_fmt), "%d", expected);
+	lt_eval_emit(call, input, "expected sign/value like libc", expected_fmt,
+		"actual return", actual_fmt, passed);
+	if (passed)
 		return (1);
 	snprintf(message, size,
 		"call: %s\ninput: %s\nexpected sign/value like libc: %d\nactual return: %d",
@@ -642,11 +714,16 @@ static int	lt_check_string(char *message, size_t size, const char *call,
 {
 	char	actual_fmt[256];
 	char	expected_fmt[256];
+	int		passed;
 
-	if ((!actual && !expected) || (actual && expected && strcmp(actual, expected) == 0))
-		return (1);
+	passed = ((!actual && !expected)
+		|| (actual && expected && strcmp(actual, expected) == 0));
 	lt_format_string(actual_fmt, sizeof(actual_fmt), actual);
 	lt_format_string(expected_fmt, sizeof(expected_fmt), expected);
+	lt_eval_emit(call, input, "expected string", expected_fmt,
+		"actual string", actual_fmt, passed);
+	if (passed)
+		return (1);
 	snprintf(message, size,
 		"call: %s\ninput: %s\nexpected string: %s\nactual string: %s",
 		call, input, expected_fmt, actual_fmt);
@@ -661,11 +738,15 @@ static int	lt_check_bytes(char *message, size_t size, const char *call,
 	size_t				diff;
 	const unsigned char	*actual_bytes;
 	const unsigned char	*expected_bytes;
+	int					passed;
 
-	if (actual && expected && memcmp(actual, expected, len) == 0)
-		return (1);
+	passed = (actual && expected && memcmp(actual, expected, len) == 0);
 	lt_format_bytes(actual_fmt, sizeof(actual_fmt), actual, len);
 	lt_format_bytes(expected_fmt, sizeof(expected_fmt), expected, len);
+	lt_eval_emit(call, input, "expected bytes", expected_fmt,
+		"actual bytes", actual_fmt, passed);
+	if (passed)
+		return (1);
 	if (!actual || !expected)
 	{
 		snprintf(message, size,
@@ -690,11 +771,15 @@ static int	lt_check_ptr(char *message, size_t size, const char *call,
 {
 	char	actual_fmt[128];
 	char	expected_fmt[128];
+	int		passed;
 
-	if (actual == expected)
-		return (1);
+	passed = (actual == expected);
 	lt_format_ptr(actual_fmt, sizeof(actual_fmt), actual, base, len);
 	lt_format_ptr(expected_fmt, sizeof(expected_fmt), expected, base, len);
+	lt_eval_emit(call, input, "expected pointer", expected_fmt,
+		"actual pointer", actual_fmt, passed);
+	if (passed)
+		return (1);
 	snprintf(message, size,
 		"call: %s\ninput: %s\nexpected pointer: %s\nactual pointer: %s",
 		call, input, expected_fmt, actual_fmt);
@@ -756,15 +841,15 @@ static t_lt_result	test_isalpha_ascii(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_isalpha);
 	c = -1;
 	while (c <= 255)
 	{
 		expected = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-		LT_CHECK(ft_isalpha(c) == expected,
-			"ft_isalpha(%d) returned %d, expected %d",
-			c, ft_isalpha(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_isalpha(c)", context, ft_isalpha(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -774,15 +859,15 @@ static t_lt_result	test_isdigit_ascii(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_isdigit);
 	c = -1;
 	while (c <= 255)
 	{
 		expected = (c >= '0' && c <= '9');
-		LT_CHECK(ft_isdigit(c) == expected,
-			"ft_isdigit(%d) returned %d, expected %d",
-			c, ft_isdigit(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_isdigit(c)", context, ft_isdigit(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -792,6 +877,7 @@ static t_lt_result	test_isalnum_ascii(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_isalnum);
 	c = -1;
@@ -799,9 +885,8 @@ static t_lt_result	test_isalnum_ascii(char *message, size_t size)
 	{
 		expected = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 			|| (c >= '0' && c <= '9'));
-		LT_CHECK(ft_isalnum(c) == expected,
-			"ft_isalnum(%d) returned %d, expected %d",
-			c, ft_isalnum(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_isalnum(c)", context, ft_isalnum(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -811,15 +896,15 @@ static t_lt_result	test_isascii_range(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_isascii);
 	c = -100;
 	while (c <= 300)
 	{
 		expected = (c >= 0 && c <= 127);
-		LT_CHECK(ft_isascii(c) == expected,
-			"ft_isascii(%d) returned %d, expected %d",
-			c, ft_isascii(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_isascii(c)", context, ft_isascii(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -829,15 +914,15 @@ static t_lt_result	test_isprint_ascii(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_isprint);
 	c = -1;
 	while (c <= 255)
 	{
 		expected = (c >= 32 && c <= 126);
-		LT_CHECK(ft_isprint(c) == expected,
-			"ft_isprint(%d) returned %d, expected %d",
-			c, ft_isprint(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_isprint(c)", context, ft_isprint(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -1083,6 +1168,7 @@ static t_lt_result	test_toupper_cases(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_toupper);
 	c = -1;
@@ -1091,9 +1177,8 @@ static t_lt_result	test_toupper_cases(char *message, size_t size)
 		expected = c;
 		if (c >= 'a' && c <= 'z')
 			expected = c - 32;
-		LT_CHECK(ft_toupper(c) == expected,
-			"ft_toupper(%d) returned %d, expected %d",
-			c, ft_toupper(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_toupper(c)", context, ft_toupper(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -1103,6 +1188,7 @@ static t_lt_result	test_tolower_cases(char *message, size_t size)
 {
 	int	c;
 	int	expected;
+	char	context[32];
 
 	LT_REQUIRE(ft_tolower);
 	c = -1;
@@ -1111,9 +1197,8 @@ static t_lt_result	test_tolower_cases(char *message, size_t size)
 		expected = c;
 		if (c >= 'A' && c <= 'Z')
 			expected = c + 32;
-		LT_CHECK(ft_tolower(c) == expected,
-			"ft_tolower(%d) returned %d, expected %d",
-			c, ft_tolower(c), expected);
+		snprintf(context, sizeof(context), "c=%d", c);
+		LT_EXPECT_INT("ft_tolower(c)", context, ft_tolower(c), expected);
 		c++;
 	}
 	return (LT_PASS);
@@ -2497,7 +2582,7 @@ static int	list_tests(void)
 static int	run_test(const char *id)
 {
 	size_t		index;
-	char		message[1024];
+	char		message[LT_MESSAGE_SIZE];
 	t_lt_result	result;
 
 	index = 0;

@@ -18,6 +18,7 @@ make
 ./libft-tester ../libft --asan
 ./libft-tester ../libft --verbose
 ./libft-tester ../libft --only ft_memmove
+./libft-tester ../libft --only ft_memmove --evaluation
 ./libft-tester ../libft --source-build
 ./libft-tester ../libft --source-build --only ft_memmove
 ./libft-tester ../libft --json report.json
@@ -205,6 +206,7 @@ Mode    : mandatory
 Only    : ft_memset
 Timeout : 3s
 Memory  : off
+Eval    : off
 
 Build
 -----
@@ -234,6 +236,11 @@ and the actual result. Byte-buffer checks also show the first differing byte:
   actual bytes: [cc 61 62 00 64 65 66 cc cc cc]
   first diff: index 7 expected 0x67 actual 0xcc
 ```
+
+Use `--evaluation` with `--only` or `--all` when you want passing cases printed
+too. In that mode each exercised check is shown with the call, input values,
+expected output, and actual output, so you can inspect the tester's cases
+without writing a temporary `main`.
 
 ## What it does
 

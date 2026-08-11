@@ -689,6 +689,7 @@ def print_run_header(color: Color, project: Path, groups, only, args, mode):
     print(f"Only    : {filters}")
     print(f"Timeout : {args.timeout:g}s")
     print(f"Memory  : {memory}")
+    print(f"Eval    : {'on' if args.evaluation else 'off'}")
 
 
 def print_result(color: Color, result: TestResult, verbose: bool,
@@ -812,6 +813,11 @@ def main():
                         help="Run Valgrind. On macOS without Valgrind, falls back to ASan.")
     parser.add_argument("--verbose", action="store_true",
                         help="Print build logs and passing test output.")
+    parser.add_argument("--evaluation", action="store_true",
+                        help=(
+                            "Print each exercised case with its call, input, "
+                            "expected output, and actual output."
+                        ))
     parser.add_argument("--only", action="append",
                         help="Run only a function or test id. Can be repeated or comma separated.")
     parser.add_argument("--source-build", "--no-makefile", action="store_true",
@@ -892,6 +898,8 @@ def main():
         symbols = exported_symbols(libft)
         test_env = os.environ.copy()
         test_env["LT_AVAILABLE_SYMBOLS"] = ";".join(sorted(symbols))
+        if args.evaluation:
+            test_env["LT_EVALUATION"] = "1"
 
         harness = tmp_root / "libft_harness"
         compile_harness(libft, harness)
@@ -915,7 +923,9 @@ def main():
         for index, test in enumerate(tests, 1):
             result = run_one(harness, test, args.timeout, env=test_env)
             results.append(result)
-            print_result(color, result, args.verbose, index, len(tests))
+            print_result(
+                color, result, args.verbose or args.evaluation, index, len(tests)
+            )
 
         if mode:
             warning = memory_mode_warning(args, mode)
@@ -929,6 +939,8 @@ def main():
             if memory_tests:
                 mem_libft = libft
                 mem_env = test_env.copy()
+                if args.evaluation:
+                    mem_env["LT_EVALUATION"] = "1"
                 if mode == "asan":
                     asan_project = tmp_root / "project_asan"
                     copy_project(project, asan_project)
@@ -1000,7 +1012,13 @@ def main():
                         env=env,
                     )
                     results.append(result)
-                    print_result(color, result, args.verbose, index, len(memory_tests))
+                    print_result(
+                        color,
+                        result,
+                        args.verbose or args.evaluation,
+                        index,
+                        len(memory_tests),
+                    )
 
         failed = [result for result in results if strict_failure(result)]
         warned = [result for result in results if result.status == "warn"]
