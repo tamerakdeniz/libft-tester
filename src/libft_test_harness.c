@@ -12,7 +12,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
+
+#ifndef MAP_ANONYMOUS
+# define MAP_ANONYMOUS MAP_ANON
+#endif
 
 #define LT_WEAK_STUB __attribute__((weak))
 
@@ -331,6 +336,49 @@ static size_t	lt_alloc_end(void)
 }
 #endif
 
+typedef struct s_lt_guarded_buffer
+{
+	unsigned char	*mapping;
+	size_t			mapping_size;
+	unsigned char	*data;
+	size_t			data_size;
+} t_lt_guarded_buffer;
+
+static int	lt_guarded_buffer_init(t_lt_guarded_buffer *buffer,
+	size_t data_size)
+{
+	long			page_size;
+	unsigned char	*mapping;
+
+	page_size = sysconf(_SC_PAGESIZE);
+	if (page_size <= 0 || data_size > (size_t)page_size)
+		return (0);
+	mapping = mmap(NULL, (size_t)page_size * 2, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mapping == MAP_FAILED)
+		return (0);
+	if (mprotect(mapping + page_size, (size_t)page_size, PROT_NONE) != 0)
+	{
+		munmap(mapping, (size_t)page_size * 2);
+		return (0);
+	}
+	buffer->mapping = mapping;
+	buffer->mapping_size = (size_t)page_size * 2;
+	buffer->data = mapping + page_size - data_size;
+	buffer->data_size = data_size;
+	return (1);
+}
+
+static void	lt_guarded_buffer_destroy(t_lt_guarded_buffer *buffer)
+{
+	if (buffer->mapping)
+		munmap(buffer->mapping, buffer->mapping_size);
+	buffer->mapping = NULL;
+	buffer->mapping_size = 0;
+	buffer->data = NULL;
+	buffer->data_size = 0;
+}
+
 static size_t	ref_strlen(const char *s)
 {
 	size_t	len;
@@ -389,7 +437,7 @@ static char	*ref_strnstr(const char *big, const char *little, size_t len)
 	if (!little[0])
 		return ((char *)big);
 	index = 0;
-	while (big[index] && index < len)
+	while (index < len && big[index])
 	{
 		needle = 0;
 		while (little[needle] && index + needle < len
@@ -1003,6 +1051,34 @@ static t_lt_result	test_strlcat_cases(char *message, size_t size)
 	return (LT_PASS);
 }
 
+static t_lt_result	test_strlcat_boundary(char *message, size_t size)
+{
+	t_lt_guarded_buffer	guard;
+	size_t				ret;
+
+	LT_REQUIRE(ft_strlcat);
+	memset(&guard, 0, sizeof(guard));
+	if (!lt_guarded_buffer_init(&guard, 3))
+	{
+		snprintf(message, size, "could not create a protected boundary buffer");
+		return (LT_SKIP);
+	}
+	memcpy(guard.data, "abc", 3);
+	ret = ft_strlcat((char *)guard.data, "ZZ", 3);
+	if (ret != 5 || memcmp(guard.data, "abc", 3) != 0)
+	{
+		snprintf(message, size,
+			"call: ft_strlcat(dst, \"ZZ\", 3)\n"
+			"input: dst is exactly 3 non-NUL bytes before an inaccessible page\n"
+			"expected: return 5 and leave bytes [61 62 63] unchanged\n"
+			"actual return: %zu", ret);
+		lt_guarded_buffer_destroy(&guard);
+		return (LT_FAIL);
+	}
+	lt_guarded_buffer_destroy(&guard);
+	return (LT_PASS);
+}
+
 static t_lt_result	test_toupper_cases(char *message, size_t size)
 {
 	int	c;
@@ -1072,7 +1148,8 @@ static t_lt_result	test_strchr_cases(char *message, size_t size)
 
 static t_lt_result	test_strrchr_cases(char *message, size_t size)
 {
-	const char	*s;
+	const char		*s;
+	unsigned char	raw[5];
 
 	LT_REQUIRE(ft_strrchr);
 	s = "abacad";
@@ -1085,6 +1162,19 @@ static t_lt_result	test_strrchr_cases(char *message, size_t size)
 		s, ref_strlen(s));
 	LT_EXPECT_PTR("ft_strrchr(\"abacad\", 'z')", "s=\"abacad\", c='z'",
 		ft_strrchr(s, 'z'), NULL, s, ref_strlen(s));
+	raw[0] = 'x';
+	raw[1] = 0xff;
+	raw[2] = 'y';
+	raw[3] = 0xff;
+	raw[4] = 0;
+	LT_EXPECT_PTR("ft_strrchr(raw, 0xff)",
+		"raw bytes [78 ff 79 ff 00], c=0xff",
+		ft_strrchr((char *)raw, 0xff), (char *)raw + 3,
+		raw, sizeof(raw));
+	LT_EXPECT_PTR("ft_strrchr(raw, 0x1ff)",
+		"c must be converted to unsigned char 0xff",
+		ft_strrchr((char *)raw, 0x1ff), (char *)raw + 3,
+		raw, sizeof(raw));
 	return (LT_PASS);
 }
 
@@ -1186,6 +1276,59 @@ static t_lt_result	test_strnstr_cases(char *message, size_t size)
 	return (LT_PASS);
 }
 
+static t_lt_result	test_strnstr_zero_len_boundary(char *message, size_t size)
+{
+	t_lt_guarded_buffer	guard;
+	char				*result;
+
+	LT_REQUIRE(ft_strnstr);
+	memset(&guard, 0, sizeof(guard));
+	if (!lt_guarded_buffer_init(&guard, 0))
+	{
+		snprintf(message, size, "could not create a protected boundary buffer");
+		return (LT_SKIP);
+	}
+	result = ft_strnstr((char *)guard.data, "x", 0);
+	if (result != NULL)
+	{
+		snprintf(message, size,
+			"call: ft_strnstr(inaccessible, \"x\", 0)\n"
+			"expected pointer: <NULL> without reading the haystack\n"
+			"actual pointer: %p", (void *)result);
+		lt_guarded_buffer_destroy(&guard);
+		return (LT_FAIL);
+	}
+	lt_guarded_buffer_destroy(&guard);
+	return (LT_PASS);
+}
+
+static t_lt_result	test_strnstr_match_boundary(char *message, size_t size)
+{
+	t_lt_guarded_buffer	guard;
+	char				*result;
+
+	LT_REQUIRE(ft_strnstr);
+	memset(&guard, 0, sizeof(guard));
+	if (!lt_guarded_buffer_init(&guard, 1))
+	{
+		snprintf(message, size, "could not create a protected boundary buffer");
+		return (LT_SKIP);
+	}
+	guard.data[0] = 'a';
+	result = ft_strnstr((char *)guard.data, "aa", 1);
+	if (result != NULL)
+	{
+		snprintf(message, size,
+			"call: ft_strnstr([61], \"aa\", 1)\n"
+			"expected pointer: <NULL> without reading byte index 1\n"
+			"actual pointer: %p", (void *)result);
+		lt_guarded_buffer_destroy(&guard);
+		return (LT_FAIL);
+	}
+	lt_guarded_buffer_destroy(&guard);
+	return (LT_PASS);
+}
+
 static t_lt_result	test_atoi_cases(char *message, size_t size)
 {
 	struct s_case
@@ -1216,6 +1359,8 @@ static t_lt_result	test_atoi_cases(char *message, size_t size)
 static t_lt_result	test_calloc_cases(char *message, size_t size)
 {
 	unsigned char	*ptr;
+	void			*zero_a;
+	void			*zero_b;
 	size_t			index;
 	char			context[128];
 
@@ -1234,16 +1379,25 @@ static t_lt_result	test_calloc_cases(char *message, size_t size)
 		index++;
 	}
 	free(ptr);
-	ptr = ft_calloc(0, 16);
-	LT_CHECK(ptr != NULL,
-		"call: ft_calloc(0, 16)\n"
-		"expected: non-NULL freeable pointer\nactual pointer: <NULL>");
-	free(ptr);
-	ptr = ft_calloc(16, 0);
-	LT_CHECK(ptr != NULL,
-		"call: ft_calloc(16, 0)\n"
-		"expected: non-NULL freeable pointer\nactual pointer: <NULL>");
-	free(ptr);
+	zero_a = ft_calloc(0, 16);
+	zero_b = ft_calloc(16, 0);
+	if (!zero_a || !zero_b || zero_a == zero_b)
+	{
+		snprintf(message, size,
+			"calls: ft_calloc(0, 16); ft_calloc(16, 0)\n"
+			"expected: two distinct, non-NULL, simultaneously freeable pointers\n"
+			"actual pointers: %p and %p", zero_a, zero_b);
+		if (zero_a == zero_b)
+			free(zero_a);
+		else
+		{
+			free(zero_a);
+			free(zero_b);
+		}
+		return (LT_FAIL);
+	}
+	free(zero_a);
+	free(zero_b);
 	ptr = ft_calloc(((size_t)-1 / 2) + 1, 2);
 	LT_CHECK(ptr == NULL,
 		"call: ft_calloc(((size_t)-1 / 2) + 1, 2)\n"
@@ -1548,11 +1702,19 @@ static t_lt_result	test_putnbr_fd_cases(char *message, size_t size)
 
 static int	g_delete_count;
 static int	g_iter_sum;
+static int	g_static_map_values[3];
+static int	g_static_map_index;
 
 static void	del_count_free(void *ptr)
 {
 	g_delete_count++;
 	free(ptr);
+}
+
+static void	del_count_keep(void *ptr)
+{
+	(void)ptr;
+	g_delete_count++;
 }
 
 static void	iter_add_int(void *ptr)
@@ -1569,6 +1731,26 @@ static void	*map_double_int(void *ptr)
 		return (NULL);
 	*value = *(int *)ptr * 2;
 	return (value);
+}
+
+static void	*map_static_double_int(void *ptr)
+{
+	if (g_static_map_index >= 3)
+		return (NULL);
+	g_static_map_values[g_static_map_index] = *(int *)ptr * 2;
+	return (&g_static_map_values[g_static_map_index++]);
+}
+
+static void	free_list_nodes_only(t_list *list)
+{
+	t_list	*next;
+
+	while (list)
+	{
+		next = list->next;
+		free(list);
+		list = next;
+	}
 }
 
 static t_lt_result	test_lstnew_cases(char *message, size_t size)
@@ -1907,19 +2089,87 @@ static t_lt_result	test_allocfail_split(char *message, size_t size)
 {
 	char	**ptr;
 	size_t	outstanding;
+	long	fail_after;
 
 	LT_REQUIRE(ft_split);
 	if (!lt_alloc_supported())
 		return (LT_SKIP);
-	lt_alloc_begin(2);
-	ptr = ft_split("aa,bb,cc", ',');
-	outstanding = lt_alloc_end();
-	LT_CHECK(ptr == NULL,
-		"call: ft_split(\"aa,bb,cc\", ',') with failure after 2 allocations\n"
-		"expected pointer: <NULL>\nactual pointer: %p", ptr);
-	LT_EXPECT_SIZE("allocation tracker after failed ft_split",
-		"partial allocations must be freed after inner allocation failure",
-		outstanding, 0);
+	fail_after = 0;
+	while (fail_after < 4)
+	{
+		lt_alloc_begin(fail_after);
+		ptr = ft_split("aa,bb,cc", ',');
+		outstanding = lt_alloc_end();
+		if (ptr != NULL)
+		{
+			snprintf(message, size,
+				"call: ft_split(\"aa,bb,cc\", ',') with failure after %ld "
+				"successful allocation(s)\nexpected pointer: <NULL>\n"
+				"actual pointer: %p", fail_after, (void *)ptr);
+			free_split(ptr);
+			return (LT_FAIL);
+		}
+		if (outstanding != 0)
+		{
+			snprintf(message, size,
+				"call: ft_split(\"aa,bb,cc\", ',') with failure after %ld "
+				"successful allocation(s)\nexpected outstanding allocations: 0\n"
+				"actual outstanding allocations: %zu", fail_after, outstanding);
+			return (LT_FAIL);
+		}
+		fail_after++;
+	}
+	return (LT_PASS);
+}
+
+static t_lt_result	test_allocfail_lstmap(char *message, size_t size)
+{
+	t_list	nodes[3];
+	t_list	*mapped;
+	int		values[3];
+	size_t	outstanding;
+	long	fail_after;
+
+	LT_REQUIRE(ft_lstmap);
+	if (!lt_alloc_supported())
+		return (LT_SKIP);
+	values[0] = 1;
+	values[1] = 2;
+	values[2] = 3;
+	nodes[0].content = &values[0];
+	nodes[1].content = &values[1];
+	nodes[2].content = &values[2];
+	nodes[0].next = &nodes[1];
+	nodes[1].next = &nodes[2];
+	nodes[2].next = NULL;
+	fail_after = 0;
+	while (fail_after < 3)
+	{
+		g_delete_count = 0;
+		g_static_map_index = 0;
+		lt_alloc_begin(fail_after);
+		mapped = ft_lstmap(nodes, map_static_double_int, del_count_keep);
+		outstanding = lt_alloc_end();
+		if (mapped != NULL)
+		{
+			snprintf(message, size,
+				"call: ft_lstmap(nodes, map, del) with node allocation %ld "
+				"forced to fail\nexpected pointer: <NULL>\nactual pointer: %p",
+				fail_after + 1, (void *)mapped);
+			free_list_nodes_only(mapped);
+			return (LT_FAIL);
+		}
+		if (g_delete_count != fail_after + 1 || outstanding != 0)
+		{
+			snprintf(message, size,
+				"call: ft_lstmap(nodes, map, del) with node allocation %ld "
+				"forced to fail\nexpected del calls: %ld; actual del calls: %d\n"
+				"expected outstanding allocations: 0; actual: %zu",
+				fail_after + 1, fail_after + 1, g_delete_count, outstanding);
+			return (LT_FAIL);
+		}
+		fail_after++;
+	}
 	return (LT_PASS);
 }
 
@@ -2043,6 +2293,116 @@ static t_lt_result	test_probe_striteri_null(char *message, size_t size)
 	return (LT_PASS);
 }
 
+static t_lt_result	test_probe_lstadd_front_null(char *message, size_t size)
+{
+	t_list	node;
+	t_list	*head;
+
+	LT_REQUIRE(ft_lstadd_front);
+	node.content = NULL;
+	node.next = NULL;
+	head = &node;
+	ft_lstadd_front(&head, NULL);
+	LT_CHECK(head == &node && node.next == NULL,
+		"call: ft_lstadd_front(&head, NULL)\n"
+		"expected: existing list remains unchanged");
+	ft_lstadd_front(NULL, &node);
+	return (LT_PASS);
+}
+
+static t_lt_result	test_probe_lstadd_back_null(char *message, size_t size)
+{
+	t_list	node;
+	t_list	*head;
+
+	LT_REQUIRE(ft_lstadd_back);
+	node.content = NULL;
+	node.next = NULL;
+	head = &node;
+	ft_lstadd_back(&head, NULL);
+	LT_CHECK(head == &node && node.next == NULL,
+		"call: ft_lstadd_back(&head, NULL)\n"
+		"expected: existing list remains unchanged");
+	ft_lstadd_back(NULL, &node);
+	return (LT_PASS);
+}
+
+static t_lt_result	test_probe_lstdelone_null(char *message, size_t size)
+{
+	t_list	node;
+
+	LT_REQUIRE(ft_lstdelone);
+	node.content = NULL;
+	node.next = NULL;
+	g_delete_count = 0;
+	ft_lstdelone(NULL, del_count_keep);
+	ft_lstdelone(&node, NULL);
+	LT_CHECK(g_delete_count == 0,
+		"NULL node or NULL del callback must not invoke the callback");
+	return (LT_PASS);
+}
+
+static t_lt_result	test_probe_lstclear_null(char *message, size_t size)
+{
+	t_list	node;
+	t_list	*head;
+
+	LT_REQUIRE(ft_lstclear);
+	node.content = NULL;
+	node.next = NULL;
+	head = &node;
+	ft_lstclear(NULL, del_count_keep);
+	ft_lstclear(&head, NULL);
+	LT_CHECK(head == &node,
+		"call: ft_lstclear(&head, NULL)\n"
+		"expected: existing list remains unchanged");
+	return (LT_PASS);
+}
+
+static t_lt_result	test_probe_lstiter_null(char *message, size_t size)
+{
+	t_list	node;
+	int		value;
+
+	LT_REQUIRE(ft_lstiter);
+	value = 42;
+	node.content = &value;
+	node.next = NULL;
+	g_iter_sum = 0;
+	ft_lstiter(NULL, iter_add_int);
+	ft_lstiter(&node, NULL);
+	LT_CHECK(g_iter_sum == 0,
+		"NULL list or NULL callback must not invoke the callback");
+	return (LT_PASS);
+}
+
+static t_lt_result	test_probe_lstmap_null(char *message, size_t size)
+{
+	t_list	node;
+	t_list	*mapped;
+	int		value;
+
+	LT_REQUIRE(ft_lstmap);
+	value = 42;
+	node.content = &value;
+	node.next = NULL;
+	g_static_map_index = 0;
+	LT_CHECK(ft_lstmap(NULL, map_static_double_int, del_count_keep) == NULL,
+		"ft_lstmap(NULL, map, del) must return NULL");
+	LT_CHECK(ft_lstmap(&node, NULL, del_count_keep) == NULL,
+		"ft_lstmap(list, NULL, del) must return NULL");
+	mapped = ft_lstmap(&node, map_static_double_int, NULL);
+	if (mapped != NULL)
+	{
+		snprintf(message, size,
+			"ft_lstmap(list, map, NULL) must return NULL\n"
+			"actual pointer: %p", (void *)mapped);
+		free_list_nodes_only(mapped);
+		return (LT_FAIL);
+	}
+	return (LT_PASS);
+}
+
 static t_lt_test	g_tests[] = {
 	{"ft_isalpha.ascii", "ft_isalpha", "mandatory", "required", "ASCII alphabetic classification", test_isalpha_ascii},
 	{"ft_isdigit.ascii", "ft_isdigit", "mandatory", "required", "ASCII digit classification", test_isdigit_ascii},
@@ -2056,16 +2416,19 @@ static t_lt_test	g_tests[] = {
 	{"ft_memmove.overlap", "ft_memmove", "mandatory", "required", "forward and backward overlapping regions", test_memmove_overlap},
 	{"ft_strlcpy.cases", "ft_strlcpy", "mandatory", "required", "full, truncated, and size 0 copies", test_strlcpy_cases},
 	{"ft_strlcat.cases", "ft_strlcat", "mandatory", "required", "append, truncate, and small dstsize", test_strlcat_cases},
+	{"ft_strlcat.boundary", "ft_strlcat", "mandatory", "required", "must not read beyond dstsize", test_strlcat_boundary},
 	{"ft_toupper.cases", "ft_toupper", "mandatory", "required", "ASCII conversion and untouched bytes", test_toupper_cases},
 	{"ft_tolower.cases", "ft_tolower", "mandatory", "required", "ASCII conversion and untouched bytes", test_tolower_cases},
 	{"ft_strchr.cases", "ft_strchr", "mandatory", "required", "first match, NUL, miss, high byte", test_strchr_cases},
-	{"ft_strrchr.cases", "ft_strrchr", "mandatory", "required", "last match, NUL, and miss", test_strrchr_cases},
+	{"ft_strrchr.cases", "ft_strrchr", "mandatory", "required", "last match, NUL, miss, and high byte", test_strrchr_cases},
 	{"ft_strncmp.cases", "ft_strncmp", "mandatory", "required", "sign, n 0, and unsigned comparison", test_strncmp_cases},
 	{"ft_memchr.cases", "ft_memchr", "mandatory", "required", "NUL, high byte, bounds, and miss", test_memchr_cases},
 	{"ft_memcmp.cases", "ft_memcmp", "mandatory", "required", "equality, n 0, and unsigned sign", test_memcmp_cases},
 	{"ft_strnstr.cases", "ft_strnstr", "mandatory", "required", "needle and length boundary cases", test_strnstr_cases},
+	{"ft_strnstr.zero_len_boundary", "ft_strnstr", "mandatory", "required", "len 0 must not read haystack", test_strnstr_zero_len_boundary},
+	{"ft_strnstr.match_boundary", "ft_strnstr", "mandatory", "required", "partial match must not read beyond len", test_strnstr_match_boundary},
 	{"ft_atoi.cases", "ft_atoi", "mandatory", "required", "spaces, signs, limits, and suffixes", test_atoi_cases},
-	{"ft_calloc.cases", "ft_calloc", "mandatory", "required", "zeroing, zero-size rule, and overflow", test_calloc_cases},
+	{"ft_calloc.cases", "ft_calloc", "mandatory", "required", "zeroing, unique zero-size pointers, and overflow", test_calloc_cases},
 	{"ft_strdup.cases", "ft_strdup", "mandatory", "required", "content, empty string, writable copy", test_strdup_cases},
 	{"ft_substr.cases", "ft_substr", "mandatory", "required", "normal, out-of-range, long len, zero len", test_substr_cases},
 	{"ft_strjoin.cases", "ft_strjoin", "mandatory", "required", "normal and empty-side joins", test_strjoin_cases},
@@ -2092,16 +2455,23 @@ static t_lt_test	g_tests[] = {
 	{"ft_substr.allocfail", "ft_substr", "mandatory", "allocfail", "allocation failure returns NULL", test_allocfail_substr},
 	{"ft_strjoin.allocfail", "ft_strjoin", "mandatory", "allocfail", "allocation failure returns NULL", test_allocfail_strjoin},
 	{"ft_strtrim.allocfail", "ft_strtrim", "mandatory", "allocfail", "allocation failure returns NULL", test_allocfail_strtrim},
-	{"ft_split.allocfail", "ft_split", "mandatory", "allocfail", "partial allocation failure is cleaned up", test_allocfail_split},
+	{"ft_split.allocfail", "ft_split", "mandatory", "allocfail", "every partial allocation failure is cleaned up", test_allocfail_split},
 	{"ft_itoa.allocfail", "ft_itoa", "mandatory", "allocfail", "allocation failure returns NULL", test_allocfail_itoa},
 	{"ft_strmapi.allocfail", "ft_strmapi", "mandatory", "allocfail", "allocation failure returns NULL", test_allocfail_strmapi},
 	{"ft_lstnew.allocfail", "ft_lstnew", "mandatory", "allocfail", "allocation failure returns NULL", test_allocfail_lstnew},
+	{"ft_lstmap.allocfail", "ft_lstmap", "mandatory", "allocfail", "every node allocation failure is cleaned up", test_allocfail_lstmap},
 	{"ft_memcpy.probe_null_zero", "ft_memcpy", "mandatory", "probe", "NULL pointers with len 0 diagnostic", test_probe_memcpy_null_zero},
 	{"ft_memmove.probe_null_zero", "ft_memmove", "mandatory", "probe", "NULL pointers with len 0 diagnostic", test_probe_memmove_null_zero},
 	{"ft_substr.probe_null", "ft_substr", "mandatory", "probe", "NULL string diagnostic", test_probe_substr_null},
 	{"ft_strjoin.probe_null", "ft_strjoin", "mandatory", "probe", "NULL string diagnostic", test_probe_strjoin_null},
 	{"ft_split.probe_null", "ft_split", "mandatory", "probe", "NULL string diagnostic", test_probe_split_null},
 	{"ft_striteri.probe_null", "ft_striteri", "mandatory", "probe", "NULL string diagnostic", test_probe_striteri_null},
+	{"ft_lstadd_front.probe_null", "ft_lstadd_front", "mandatory", "probe", "NULL list and node diagnostics", test_probe_lstadd_front_null},
+	{"ft_lstadd_back.probe_null", "ft_lstadd_back", "mandatory", "probe", "NULL list and node diagnostics", test_probe_lstadd_back_null},
+	{"ft_lstdelone.probe_null", "ft_lstdelone", "mandatory", "probe", "NULL node and callback diagnostics", test_probe_lstdelone_null},
+	{"ft_lstclear.probe_null", "ft_lstclear", "mandatory", "probe", "NULL list and callback diagnostics", test_probe_lstclear_null},
+	{"ft_lstiter.probe_null", "ft_lstiter", "mandatory", "probe", "NULL list and callback diagnostics", test_probe_lstiter_null},
+	{"ft_lstmap.probe_null", "ft_lstmap", "mandatory", "probe", "NULL list and callback diagnostics", test_probe_lstmap_null},
 };
 
 static size_t	test_count(void)

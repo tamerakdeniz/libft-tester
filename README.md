@@ -239,8 +239,12 @@ and the actual result. Byte-buffer checks also show the first differing byte:
   available `.c` files, with a temporary compatibility `libft.h` if needed.
 - Finds and links the produced `libft.a`.
 - Runs each test as a separate process with a timeout.
+- Uses protected-page boundary cases for bounded string functions, catching
+  reads past `dstsize` or `len` even without Valgrind or ASan.
 - Reports crashes by signal name, including `SIGSEGV`, `SIGABRT`, `SIGBUS`, and
   `SIGFPE`.
+- Injects allocation failures at each owned allocation point for multi-allocation
+  functions and verifies that partial results are cleaned up.
 - Supports optional memory passes with `--valgrind`, `--asan`, or `--leaks`.
   ASan uses a separately copied build with sanitizer `CFLAGS` when the submitted
   Makefile honors command-line variables.
